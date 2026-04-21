@@ -101,8 +101,10 @@ defmodule Durable.Executor do
     with {:ok, execution} <- load_execution(config, workflow_id),
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
          {:ok, execution} <- mark_running(config, execution) do
-      # Set workflow ID for logging/observability
-      Context.set_workflow_id(execution.id)
+      # Set workflow ID for logging/observability and populate workflow input
+      # into the process dictionary so step functions can call
+      # `Durable.Context.input/0` without threading input through pipeline data.
+      Context.init_context(execution.input, execution.id)
 
       # Check if this is a single-step parallel child execution
       parallel_step_flag =
