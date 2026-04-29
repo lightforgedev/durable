@@ -63,7 +63,7 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
 
     ~H"""
     <.link
-      href={@item.href}
+      navigate={@item.href}
       class={[
         "flex items-center gap-2.5 px-2.5 h-8 rounded-md",
         "text-[13px] font-medium transition-colors",

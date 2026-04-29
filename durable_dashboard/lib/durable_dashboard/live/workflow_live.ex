@@ -121,7 +121,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           description={"No execution with id " <> (@workflow_id || "—") <> " on this instance."}
         >
           <:action>
-            <Core.button kind="link" href={DPath.workflows(@base_path)}>
+            <Core.button kind="link" navigate={DPath.workflows(@base_path)}>
               Back to workflows
             </Core.button>
           </:action>

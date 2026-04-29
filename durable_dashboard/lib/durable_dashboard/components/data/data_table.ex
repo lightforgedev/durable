@@ -23,7 +23,7 @@ defmodule DurableDashboard.Components.Data.DataTable do
   | `:filters` | no | List of filter definitions (see below); default `[]` |
   | `:query` | yes | Current query — usually parsed from URL by the parent |
   | `:row_id` | no | `(row -> id_string)` for stream identity (default: `& &1.id`) |
-  | `:row_navigate` | no | `(row -> url_string)` — clicking a row patches here |
+  | `:row_navigate` | no | `(row -> url_string)` — clicking a row live-navigates here |
   | `:per_page` | no | default 20 |
   | `:empty_title` | no | empty-state title (default `"No results"`) |
   | `:empty_description` | no | empty-state subtitle (optional) |
@@ -503,13 +503,7 @@ defmodule DurableDashboard.Components.Data.DataTable do
 
   defp row_click(nil, _row), do: nil
 
-  # Use a plain custom DOM event handled by the BrowserNav JS hook in
-  # `assets/src/v2/main.ts`. We deliberately DON'T use JS.navigate / JS.patch
-  # here: both attempt a live_redirect first, which fails with `unauthorized`
-  # under a forwarded sub-router because Phoenix LV's session validation
-  # uses the host endpoint's router (which only sees the `forward` route).
-  # A plain `window.location.href = ...` sidesteps the validation entirely.
   defp row_click(navigate_fn, row) do
-    JS.dispatch("durable:goto", to: "html", detail: %{href: navigate_fn.(row)})
+    JS.navigate(navigate_fn.(row))
   end
 end

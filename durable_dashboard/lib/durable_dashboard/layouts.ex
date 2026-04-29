@@ -34,6 +34,7 @@ defmodule DurableDashboard.Layouts do
           href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         />
         <link :if={!@dev_mode} rel="stylesheet" href={asset_path(assigns, "app.css")} />
+        <link :if={@dev_mode} rel="stylesheet" href="http://localhost:5173/src/index.css" />
         <script>
           // Pick the right theme class on the root before paint.
           (function () {
@@ -70,7 +71,6 @@ defmodule DurableDashboard.Layouts do
             window.$RefreshSig$ = () => (type) => type
             window.__vite_plugin_react_preamble_installed__ = true
           </script>
-          <link rel="stylesheet" href="http://localhost:5173/src/index.css" />
           <script type="module" src="http://localhost:5173/src/v2/main.ts">
           </script>
         <% else %>

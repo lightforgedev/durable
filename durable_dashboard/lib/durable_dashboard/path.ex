@@ -8,8 +8,8 @@ defmodule DurableDashboard.Path do
 
   ## Usage
 
-      <.link href={Path.workflows(@base_path)}>Workflows</.link>
-      <.link href={Path.workflow(@base_path, exec.id)}>...</.link>
+      <.link navigate={Path.workflows(@base_path)}>Workflows</.link>
+      <.link navigate={Path.workflow(@base_path, exec.id)}>...</.link>
       <.link patch={Path.workflow_tab(@base_path, exec.id, "logs")}>Logs</.link>
   """
 

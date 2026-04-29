@@ -92,7 +92,7 @@ defmodule DurableDashboard.Live.OverviewLive do
         <Core.card padding="none">
           <:title>Recent workflows</:title>
           <:action>
-            <Core.button kind="link" href={DPath.workflows(@base_path)}>
+            <Core.button kind="link" navigate={DPath.workflows(@base_path)}>
               View all
             </Core.button>
           </:action>
@@ -118,12 +118,7 @@ defmodule DurableDashboard.Live.OverviewLive do
                 <tr
                   :for={exec <- @recent}
                   class="border-b border-border/60 last:border-b-0 hover:bg-accent/40 cursor-pointer transition-colors"
-                  phx-click={
-                    JS.dispatch("durable:goto",
-                      to: "html",
-                      detail: %{href: DPath.workflow(@base_path, exec.id)}
-                    )
-                  }
+                  phx-click={JS.navigate(DPath.workflow(@base_path, exec.id))}
                 >
                   <td class="px-4 py-2.5"><Core.code>{short_id(exec.id)}</Core.code></td>
                   <td class="px-4 py-2.5 font-medium">{exec.workflow_name}</td>

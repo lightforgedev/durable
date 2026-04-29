@@ -42,7 +42,7 @@ defmodule DurableDashboard.Components.Layout.Breadcrumb do
 
   defp crumb_item(%{crumb: %{href: href}, last?: false} = assigns) when is_binary(href) do
     ~H"""
-    <.link href={@crumb.href} class="hover:text-foreground transition-colors">
+    <.link navigate={@crumb.href} class="hover:text-foreground transition-colors">
       {@crumb.label}
     </.link>
     """

@@ -32,14 +32,5 @@ const liveSocket = new LiveSocket(liveSocketPath, Socket, {
 
 liveSocket.connect();
 
-// Plain browser navigation triggered from server-side via JS.dispatch.
-// Used by DataTable row click — bypasses LV's live_redirect entirely.
-document.documentElement.addEventListener("durable:goto", (e) => {
-  const detail = (e as CustomEvent<{ href?: string }>).detail;
-  if (detail?.href) {
-    window.location.href = detail.href;
-  }
-});
-
 // Expose for debugging.
 (window as unknown as Record<string, unknown>).liveSocket = liveSocket;

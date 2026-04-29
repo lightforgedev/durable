@@ -10,7 +10,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   - `palette:close` — close (Esc, click overlay, click X)
   - `palette:search` `%{"value" => q}` — phx-change on the input
   - `palette:move` `%{"dir" => "up" | "down"}` — keyboard nav
-  - `palette:activate` — Enter key → patch to the selected result
+  - `palette:activate` — Enter key → live-navigate to the selected result
 
   ## Items
 
@@ -83,7 +83,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
         {:noreply,
          socket
          |> assign(open?: false, query: "")
-         |> push_patch(to: item.href)}
+         |> push_navigate(to: item.href)}
     end
   end
 

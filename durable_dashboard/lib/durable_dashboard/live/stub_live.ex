@@ -53,7 +53,7 @@ defmodule DurableDashboard.Live.StubLive do
           description={"This view will be migrated to LiveView during phase " <> @phase <> " of the dashboard rewrite."}
         >
           <:action>
-            <Core.button kind="link" href={DurableDashboard.Path.overview(@base_path)}>
+            <Core.button kind="link" navigate={DurableDashboard.Path.overview(@base_path)}>
               Back to Overview
             </Core.button>
           </:action>
