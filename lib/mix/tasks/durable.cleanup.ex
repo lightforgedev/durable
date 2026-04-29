@@ -41,7 +41,7 @@ defmodule Mix.Tasks.Durable.Cleanup do
 
   @impl Mix.Task
   def run(args) do
-    Helpers.ensure_started()
+    Helpers.ensure_started_readonly()
 
     {opts, _, _} =
       OptionParser.parse(args,

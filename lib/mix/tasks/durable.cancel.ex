@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Durable.Cancel do
 
   @impl Mix.Task
   def run(args) do
-    Helpers.ensure_started()
+    Helpers.ensure_started_readonly()
 
     {opts, positional, _} =
       OptionParser.parse(args, strict: [reason: :string, name: :string])
