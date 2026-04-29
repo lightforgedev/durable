@@ -49,6 +49,7 @@ defmodule Durable.MixProject do
       {:nimble_options, "~> 1.1"},
       {:crontab, "~> 1.1"},
       {:igniter, "~> 0.6", optional: true},
+      {:phoenix_pubsub, "~> 2.1", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},

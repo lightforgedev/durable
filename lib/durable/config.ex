@@ -45,7 +45,9 @@ defmodule Durable.Config do
           heartbeat_interval: pos_integer(),
           scheduled_modules: [module()],
           scheduler_interval: pos_integer(),
-          log_level: false | :debug | :info | :warning | :error
+          log_level: false | :debug | :info | :warning | :error,
+          pubsub: atom() | nil,
+          owns_pubsub?: boolean()
         }
 
   defstruct [
@@ -58,7 +60,9 @@ defmodule Durable.Config do
     :heartbeat_interval,
     :scheduled_modules,
     :scheduler_interval,
-    :log_level
+    :log_level,
+    :pubsub,
+    owns_pubsub?: false
   ]
 
   @schema [
@@ -111,6 +115,15 @@ defmodule Durable.Config do
       type: {:in, [false, :debug, :info, :warning, :error]},
       default: false,
       doc: "Log level for Ecto queries (false disables logging, default: false)"
+    ],
+    pubsub: [
+      type: :atom,
+      default: nil,
+      doc:
+        "Phoenix.PubSub server name for lifecycle broadcasts. " <>
+          "Pass an atom like `MyApp.PubSub` to reuse a PubSub started by the host app. " <>
+          "Pass `:start` to have Durable start its own (named after the instance). " <>
+          "Leave as `nil` to disable broadcasting (default)."
     ]
   ]
 
@@ -118,15 +131,49 @@ defmodule Durable.Config do
   Creates a new validated configuration from options.
 
   Returns `{:ok, config}` if valid, `{:error, reason}` otherwise.
+
+  Respects the `:durable` app env key `:disable_queue_processing`. When
+  set to `true`, it forces `queue_enabled: false` regardless of the
+  user's opts. Mix tasks set this before booting the host app so they
+  don't accidentally claim jobs they can't finish.
   """
   @spec new(keyword()) :: {:ok, t()} | {:error, NimbleOptions.ValidationError.t()}
   def new(opts) do
+    opts = maybe_force_queue_disabled(opts)
+
     case NimbleOptions.validate(opts, @schema) do
       {:ok, validated} ->
+        validated = resolve_pubsub(validated)
         {:ok, struct(__MODULE__, validated)}
 
       {:error, %NimbleOptions.ValidationError{}} = error ->
         error
+    end
+  end
+
+  defp maybe_force_queue_disabled(opts) do
+    if Application.get_env(:durable, :disable_queue_processing, false) do
+      Keyword.put(opts, :queue_enabled, false)
+    else
+      opts
+    end
+  end
+
+  # Resolve `:pubsub` sentinel values to concrete server names.
+  # `:start` becomes the conventional `Durable.<instance>.PubSub` name so the
+  # supervisor can start its own PubSub under that name and sets the owns flag.
+  defp resolve_pubsub(opts) do
+    case Keyword.get(opts, :pubsub) do
+      :start ->
+        name = Keyword.get(opts, :name, Durable)
+        owned = Module.concat([name, PubSub])
+
+        opts
+        |> Keyword.put(:pubsub, owned)
+        |> Keyword.put(:owns_pubsub?, true)
+
+      _ ->
+        opts
     end
   end
 
