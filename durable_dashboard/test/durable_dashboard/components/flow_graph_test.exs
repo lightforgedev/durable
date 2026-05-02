@@ -87,7 +87,8 @@ defmodule DurableDashboard.Components.FlowGraphTest do
 
       escaped_edges =
         Enum.filter(edges, fn e ->
-          String.starts_with?(e.source, "parallel_100__") and not String.contains?(e.target, "parallel_100")
+          String.starts_with?(e.source, "parallel_100__") and
+            not String.contains?(e.target, "parallel_100")
         end)
 
       assert escaped_edges == [],
@@ -349,17 +350,42 @@ defmodule DurableDashboard.Components.FlowGraphTest do
       module: __MODULE__,
       steps: [
         %Definition.Step{name: :register_employee, type: :step, module: __MODULE__, opts: %{}},
-        %Definition.Step{name: :collect_equipment_preferences, type: :step, module: __MODULE__, opts: %{}},
+        %Definition.Step{
+          name: :collect_equipment_preferences,
+          type: :step,
+          module: __MODULE__,
+          opts: %{}
+        },
         %Definition.Step{
           name: :provision_parallel,
           type: :parallel,
           module: __MODULE__,
           opts: %{steps: children, all_steps: children}
         },
-        %Definition.Step{name: :setup_email, type: :step, module: __MODULE__, opts: %{parallel_id: 1}},
-        %Definition.Step{name: :setup_dev_tools, type: :step, module: __MODULE__, opts: %{parallel_id: 1}},
-        %Definition.Step{name: :order_equipment, type: :step, module: __MODULE__, opts: %{parallel_id: 1}},
-        %Definition.Step{name: :create_payroll_record, type: :step, module: __MODULE__, opts: %{parallel_id: 1}},
+        %Definition.Step{
+          name: :setup_email,
+          type: :step,
+          module: __MODULE__,
+          opts: %{parallel_id: 1}
+        },
+        %Definition.Step{
+          name: :setup_dev_tools,
+          type: :step,
+          module: __MODULE__,
+          opts: %{parallel_id: 1}
+        },
+        %Definition.Step{
+          name: :order_equipment,
+          type: :step,
+          module: __MODULE__,
+          opts: %{parallel_id: 1}
+        },
+        %Definition.Step{
+          name: :create_payroll_record,
+          type: :step,
+          module: __MODULE__,
+          opts: %{parallel_id: 1}
+        },
         %Definition.Step{name: :manager_review, type: :step, module: __MODULE__, opts: %{}},
         %Definition.Step{name: :schedule_orientation, type: :step, module: __MODULE__, opts: %{}},
         %Definition.Step{name: :send_welcome_package, type: :step, module: __MODULE__, opts: %{}}
@@ -373,7 +399,8 @@ defmodule DurableDashboard.Components.FlowGraphTest do
 
   defp step_execution(opts) do
     %{
-      id: Keyword.get(opts, :id, "exec-" <> Integer.to_string(:erlang.unique_integer([:positive]))),
+      id:
+        Keyword.get(opts, :id, "exec-" <> Integer.to_string(:erlang.unique_integer([:positive]))),
       step_name: Keyword.fetch!(opts, :name),
       status: Keyword.fetch!(opts, :status),
       attempt: Keyword.get(opts, :attempt, 1),

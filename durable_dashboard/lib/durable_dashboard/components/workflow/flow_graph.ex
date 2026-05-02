@@ -614,7 +614,9 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   defp error_field(_, _), do: ""
 
   defp format_duration(ms) when is_integer(ms) and ms < 1000, do: "#{ms}ms"
-  defp format_duration(ms) when is_integer(ms) and ms < 60_000, do: "#{Float.round(ms / 1000, 2)}s"
+
+  defp format_duration(ms) when is_integer(ms) and ms < 60_000,
+    do: "#{Float.round(ms / 1000, 2)}s"
 
   defp format_duration(ms) when is_integer(ms),
     do: "#{div(ms, 60_000)}m #{div(rem(ms, 60_000), 1000)}s"
