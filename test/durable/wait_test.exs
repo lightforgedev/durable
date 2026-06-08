@@ -317,6 +317,46 @@ defmodule Durable.WaitTest do
       assert execution.status == :completed
     end
 
+    test "provide_input wakes the queue poller for non-inline resume" do
+      durable_name = :provide_input_wake_test
+
+      start_supervised!(
+        {Durable,
+         repo: Durable.TestRepo,
+         name: durable_name,
+         queues: %{default: [concurrency: 1, poll_interval: 60_000]},
+         queue_enabled: true}
+      )
+
+      config = Config.get(durable_name)
+      repo = config.repo
+
+      {:ok, workflow_id} = Durable.start(InputWaitTestWorkflow, %{}, durable: durable_name)
+
+      assert_eventually(fn ->
+        repo.get!(WorkflowExecution, workflow_id).status == :waiting
+      end)
+
+      :ok =
+        Wait.provide_input(
+          workflow_id,
+          "manager_approval",
+          %{"decision" => "approved"},
+          durable: durable_name
+        )
+
+      assert_eventually(
+        fn ->
+          execution = repo.get!(WorkflowExecution, workflow_id)
+
+          execution.status == :completed and
+            execution.context["approval"] == %{"decision" => "approved"}
+        end,
+        2_000,
+        25
+      )
+    end
+
     test "with timeout option sets timeout_at" do
       config = Config.get(Durable)
       repo = config.repo
