@@ -15,6 +15,7 @@ defmodule Durable.Executor do
   alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Queue.Manager, as: QueueManager
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.PendingInput
@@ -166,25 +167,23 @@ defmodule Durable.Executor do
     safe_additional = sanitize_for_json(additional_context)
 
     with {:ok, execution} <- load_execution(config, workflow_id),
-         true <- execution.status == :waiting || {:error, :not_waiting} do
-      # Merge additional context
-      new_context = Map.merge(execution.context || %{}, safe_additional)
-
-      execution
-      |> Ecto.Changeset.change(
-        context: new_context,
-        status: :pending,
-        locked_by: nil,
-        locked_at: nil
-      )
-      |> Repo.update(config)
-
-      # For inline/synchronous execution (useful for testing)
+         true <- execution.status == :waiting || {:error, :not_waiting},
+         new_context = Map.merge(execution.context || %{}, safe_additional),
+         {:ok, execution} <-
+           execution
+           |> Ecto.Changeset.change(
+             context: new_context,
+             status: :pending,
+             locked_by: nil,
+             locked_at: nil
+           )
+           |> Repo.update(config) do
       if Keyword.get(opts, :inline, false) do
         execute_workflow(workflow_id, config)
+      else
+        QueueManager.wake(durable_name, execution.queue)
       end
 
-      # Otherwise, the queue poller will pick up the job
       {:ok, workflow_id}
     end
   end
