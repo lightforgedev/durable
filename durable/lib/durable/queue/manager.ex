@@ -62,6 +62,17 @@ defmodule Durable.Queue.Manager do
   end
 
   @doc """
+  Wakes a queue poller without changing pause/drain state.
+  """
+  @spec wake(atom(), atom() | String.t()) :: :ok
+  def wake(durable_name \\ Durable, queue_name) do
+    queue_name
+    |> normalize_queue_name()
+    |> poller_name(durable_name)
+    |> Poller.wake()
+  end
+
+  @doc """
   Drains a queue, waiting for active jobs to complete.
   """
   @spec drain(atom(), atom() | String.t(), timeout()) :: :ok | {:error, :timeout}
