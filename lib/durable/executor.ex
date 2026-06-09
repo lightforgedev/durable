@@ -351,7 +351,8 @@ defmodule Durable.Executor do
       {wait_type, opts}
       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
         # Save current data before waiting
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         handle_wait_result(config, exec, wait_type, opts)
 
       {:call_workflow, opts} ->
@@ -406,6 +407,13 @@ defmodule Durable.Executor do
 
   defp handle_wait_result(config, exec, :call_workflow, opts),
     do: handle_call_workflow(config, exec, opts)
+
+  defp pop_wait_context(opts, fallback_data) do
+    case Keyword.pop(opts, :__durable_context) do
+      {context, opts} when is_map(context) -> {opts, context}
+      {_context, opts} -> {opts, fallback_data}
+    end
+  end
 
   # ============================================================================
   # Workflow Orchestration (call_workflow)
@@ -601,23 +609,28 @@ defmodule Durable.Executor do
         {:decision, exec, target_step, new_data}
 
       {:sleep, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_sleep(config, exec, opts) |> elem(1)}
 
       {:wait_for_event, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_event(config, exec, opts) |> elem(1)}
 
       {:wait_for_input, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_input(config, exec, opts) |> elem(1)}
 
       {:wait_for_any, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_any(config, exec, opts) |> elem(1)}
 
       {:wait_for_all, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
 
       {:call_workflow, opts} ->
@@ -797,7 +810,8 @@ defmodule Durable.Executor do
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
-          {:ok, exec} = save_data_as_context(config, execution, data)
+          {wait_opts, wait_data} = pop_wait_context(wait_opts, data)
+          {:ok, exec} = save_data_as_context(config, execution, wait_data)
           handle_wait_result(config, exec, wait_type, wait_opts)
 
         {:call_workflow, call_opts} ->
