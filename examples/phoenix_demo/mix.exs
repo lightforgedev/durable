@@ -63,8 +63,7 @@ defmodule PhoenixDemo.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       # Durable workflow engine
-      {:durable, path: "../../durable"},
-      {:durable_dashboard, path: "../../durable_dashboard"}
+      {:durable, path: "../.."}
     ]
   end
 
@@ -76,27 +75,15 @@ defmodule PhoenixDemo.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: [
-        "deps.get",
-        "cmd --cd ../../durable_dashboard/assets pnpm install",
-        "ecto.setup",
-        "assets.setup",
-        "assets.build"
-      ],
+      setup: ["deps.get", "ecto.setup", "assets.setup", "assets.build"],
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
-      "assets.build": [
-        "compile",
-        "tailwind phoenix_demo",
-        "esbuild phoenix_demo",
-        "cmd --cd ../../durable_dashboard/assets pnpm build"
-      ],
+      "assets.build": ["compile", "tailwind phoenix_demo", "esbuild phoenix_demo"],
       "assets.deploy": [
         "tailwind phoenix_demo --minify",
         "esbuild phoenix_demo --minify",
-        "cmd --cd ../../durable_dashboard/assets pnpm build",
         "phx.digest"
       ],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
