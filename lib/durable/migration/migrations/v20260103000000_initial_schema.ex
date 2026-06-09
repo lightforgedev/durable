@@ -90,6 +90,7 @@ defmodule Durable.Migration.Migrations.V20260103000000InitialSchema do
       add(:step_name, :string, null: false)
       add(:step_type, :string, null: false, default: "step")
       add(:attempt, :integer, null: false, default: 1)
+      add(:session_id, :string)
       add(:status, :string, null: false, default: "pending")
       add(:input, :map)
       add(:output, :map)
@@ -112,6 +113,7 @@ defmodule Durable.Migration.Migrations.V20260103000000InitialSchema do
     create(index(:step_executions, [:workflow_id, :status], prefix: prefix))
     create(index(:step_executions, [:workflow_id, :attempt], prefix: prefix))
     create(index(:step_executions, [:workflow_id, :is_compensation], prefix: prefix))
+    create(index(:step_executions, [:workflow_id, :session_id], prefix: prefix))
 
     execute(
       "CREATE INDEX step_executions_logs_gin ON #{prefix}.step_executions USING GIN (logs)",

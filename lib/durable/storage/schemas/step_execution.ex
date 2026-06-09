@@ -17,6 +17,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
           step_name: String.t(),
           step_type: String.t(),
           attempt: integer(),
+          session_id: String.t() | nil,
           status: status(),
           input: map() | nil,
           output: map() | nil,
@@ -38,6 +39,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
     field(:step_name, :string)
     field(:step_type, :string, default: "step")
     field(:attempt, :integer, default: 1)
+    field(:session_id, :string)
 
     field(:status, Ecto.Enum,
       values: [:pending, :running, :completed, :failed, :waiting],
@@ -65,6 +67,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
   @optional_fields [
     :step_type,
     :attempt,
+    :session_id,
     :status,
     :input,
     :output,
@@ -103,14 +106,25 @@ defmodule Durable.Storage.Schemas.StepExecution do
     |> cast(
       %{
         status: :completed,
+        session_id: extract_session_id(output),
         output: output,
         logs: logs,
         completed_at: DateTime.utc_now(),
         duration_ms: duration_ms
       },
-      [:status, :output, :logs, :completed_at, :duration_ms]
+      [:status, :session_id, :output, :logs, :completed_at, :duration_ms]
     )
   end
+
+  defp extract_session_id(%{"session_id" => session_id})
+       when is_binary(session_id) and byte_size(session_id) > 0,
+       do: session_id
+
+  defp extract_session_id(%{session_id: session_id})
+       when is_binary(session_id) and byte_size(session_id) > 0,
+       do: session_id
+
+  defp extract_session_id(_output), do: nil
 
   @doc """
   Creates a changeset for failing step execution.
