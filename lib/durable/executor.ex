@@ -1144,10 +1144,13 @@ defmodule Durable.Executor do
   end
 
   defp mark_failed(config, execution, error) do
+    context = current_context_or_existing(execution.context)
+
     {:ok, execution} =
       execution
       |> WorkflowExecution.status_changeset(:failed, %{
         error: error,
+        context: context,
         completed_at: DateTime.utc_now()
       })
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
@@ -1156,6 +1159,13 @@ defmodule Durable.Executor do
     maybe_notify_parent(config, execution, :failed, error)
 
     {:error, error}
+  end
+
+  defp current_context_or_existing(existing_context) do
+    case Process.get(:durable_context, :__durable_context_missing__) do
+      context when is_map(context) -> merge_orchestration_context(context)
+      _ -> existing_context || %{}
+    end
   end
 
   # ============================================================================
