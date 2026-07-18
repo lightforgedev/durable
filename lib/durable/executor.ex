@@ -1226,12 +1226,14 @@ defmodule Durable.Executor do
     # leaves with their inspect/1 string. If save STILL fails we fall back to
     # a minimal diagnostic error so the workflow is never left as a zombie.
     safe_error = sanitize_for_json(error)
+    safe_context = execution.context |> current_context_or_existing() |> sanitize_for_json()
 
     result =
       try do
         execution
         |> WorkflowExecution.status_changeset(:failed, %{
           error: safe_error,
+          context: safe_context,
           completed_at: DateTime.utc_now()
         })
         |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
@@ -1248,6 +1250,7 @@ defmodule Durable.Executor do
           execution
           |> WorkflowExecution.status_changeset(:failed, %{
             error: fallback,
+            context: safe_context,
             completed_at: DateTime.utc_now()
           })
           |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
@@ -1308,6 +1311,12 @@ defmodule Durable.Executor do
   defp sanitize_json_key(k) when is_atom(k) or is_binary(k), do: k
   defp sanitize_json_key(k), do: inspect(k)
 
+  defp current_context_or_existing(existing_context) do
+    case Process.get(:durable_context, :__durable_context_missing__) do
+      context when is_map(context) -> merge_orchestration_context(context)
+      _ -> existing_context || %{}
+    end
+  end
   # ============================================================================
   # Parent Notification (Orchestration)
   # ============================================================================
