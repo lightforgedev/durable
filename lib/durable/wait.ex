@@ -800,9 +800,19 @@ defmodule Durable.Wait do
   end
 
   defp receive_pending_event(config, pending_event, payload) do
-    pending_event
-    |> PendingEvent.receive_changeset(payload)
-    |> Repo.update(config)
+    query = from(p in PendingEvent, where: p.id == ^pending_event.id and p.status == :pending)
+
+    case Repo.update_all(config, query,
+           set: [
+             status: :received,
+             payload: payload,
+             completed_at: DateTime.utc_now(),
+             updated_at: DateTime.utc_now()
+           ]
+         ) do
+      {1, _} -> {:ok, pending_event}
+      {0, _} -> {:error, :not_found}
+    end
   end
 
   defp get_waiting_execution(config, workflow_id) do

@@ -212,6 +212,45 @@ defmodule Durable.Executor do
     end
   end
 
+  @doc false
+  @spec fail_workflow(String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def fail_workflow(workflow_id, error, opts \\ []) when is_map(error) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    config = Config.get(durable_name)
+
+    query =
+      from(execution in WorkflowExecution,
+        where: execution.id == ^workflow_id,
+        lock: "FOR UPDATE"
+      )
+
+    case config.repo.transaction(fn ->
+           case Repo.one(config, query) do
+             nil ->
+               {:error, :not_found}
+
+             %{status: :waiting} = execution ->
+               {:ok, updated} =
+                 execution
+                 |> WorkflowExecution.status_changeset(:failed, %{
+                   error: error,
+                   completed_at: DateTime.utc_now()
+                 })
+                 |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+                 |> Repo.update(config)
+
+               maybe_notify_parent(config, updated, :failed, error)
+               :ok
+
+             _execution ->
+               {:error, :not_waiting}
+           end
+         end) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp mark_failed_execution_pending(config, workflow_id) do
     query =
       from(execution in WorkflowExecution,
@@ -1514,6 +1553,7 @@ defmodule Durable.Executor do
       step_name: execution.current_step,
       timeout_at: timeout_at,
       timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value)),
+      on_timeout: Keyword.get(opts, :on_timeout, :resume),
       wait_type: :single
     }
 

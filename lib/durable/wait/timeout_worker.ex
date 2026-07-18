@@ -9,7 +9,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   use GenServer
 
-  alias Durable.Repo
+  alias Durable.{Executor, Repo}
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup}
 
   import Ecto.Query
@@ -171,29 +171,53 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_event_timeout(config, pending_event) do
-    # Mark as timed out
-    {:ok, _} =
-      pending_event
-      |> PendingEvent.timeout_changeset()
-      |> Repo.update(config)
+    # Claim the event only while it is still pending. Event delivery makes the
+    # same status transition; the winner decides whether the run resumes or fails.
+    query = from(p in PendingEvent, where: p.id == ^pending_event.id and p.status == :pending)
 
-    # Resume workflow with timeout value
-    timeout_value = deserialize_timeout_value(pending_event.timeout_value)
+    case Repo.update_all(config, query,
+           set: [
+             status: :timeout,
+             completed_at: DateTime.utc_now(),
+             updated_at: DateTime.utc_now()
+           ]
+         ) do
+      {1, _} ->
+        case pending_event.on_timeout || :resume do
+          :fail ->
+            Executor.fail_workflow(
+              pending_event.workflow_id,
+              %{
+                type: "event_timeout",
+                message: "Timeout waiting for event: #{pending_event.event_name}",
+                event_name: pending_event.event_name,
+                step_name: pending_event.step_name
+              },
+              durable: config.name
+            )
 
-    resume_data = %{
-      pending_event.event_name => timeout_value,
-      :__timeout__ => true
-    }
+          :resume ->
+            timeout_value = deserialize_timeout_value(pending_event.timeout_value)
 
-    Durable.Executor.resume_workflow(
-      pending_event.workflow_id,
-      resume_data,
-      durable: config.name
-    )
+            resume_data = %{
+              pending_event.event_name => timeout_value,
+              :__timeout__ => true
+            }
+
+            Executor.resume_workflow(
+              pending_event.workflow_id,
+              resume_data,
+              durable: config.name
+            )
+        end
+
+      {0, _} ->
+        :ok
+    end
 
     Logger.info(
       "Timeout handled for pending event #{pending_event.event_name} " <>
-        "in workflow #{pending_event.workflow_id}"
+        "in workflow #{pending_event.workflow_id} (#{pending_event.on_timeout || :resume})"
     )
   end
 
