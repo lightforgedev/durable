@@ -126,6 +126,13 @@ defmodule Durable.Repo do
     config.repo.delete_all(queryable, merge_opts(config, opts))
   end
 
+  @doc """
+  Runs an `Ecto.Multi` or function transaction using the configured repo.
+  """
+  def transaction(%Config{} = config, fun_or_multi, opts \\ []) do
+    config.repo.transaction(fun_or_multi, merge_opts(config, opts))
+  end
+
   # ============================================================================
   # Raw SQL
   # ============================================================================

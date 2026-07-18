@@ -576,6 +576,7 @@ defmodule Durable.Executor do
       {_context, opts} -> {opts, fallback_data}
     end
   end
+
   # ============================================================================
   # Workflow Orchestration (call_workflow)
   # ============================================================================
@@ -1331,6 +1332,26 @@ defmodule Durable.Executor do
     end
   end
 
+  defp merge_orchestration_context(data) do
+    orchestration_context =
+      Process.get(:durable_context, %{})
+      |> Enum.filter(fn {key, _value} -> orchestration_key?(key) end)
+      |> Map.new()
+
+    Map.merge(data, orchestration_context)
+  end
+
+  defp orchestration_key?(key) when is_atom(key),
+    do: key |> Atom.to_string() |> orchestration_key?()
+
+  defp orchestration_key?(key) when is_binary(key) do
+    String.starts_with?(key, "__child:") or
+      String.starts_with?(key, "__fire_forget:") or
+      String.starts_with?(key, "__child_done:")
+  end
+
+  defp orchestration_key?(_key), do: false
+
   defp mark_completed(config, execution, final_data) do
     # Sanitize before persisting — the final step may return data containing
     # raw tuples (e.g., child executions in a parallel block complete with
@@ -1451,6 +1472,7 @@ defmodule Durable.Executor do
       _ -> existing_context || %{}
     end
   end
+
   # ============================================================================
   # Parent Notification (Orchestration)
   # ============================================================================
