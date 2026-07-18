@@ -31,8 +31,6 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           context: map(),
           current_step: String.t() | nil,
           error: map() | nil,
-          retry_count: non_neg_integer(),
-          last_retried_at: DateTime.t() | nil,
           parent_workflow_id: Ecto.UUID.t() | nil,
           scheduled_at: DateTime.t() | nil,
           started_at: DateTime.t() | nil,
@@ -73,14 +71,15 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:context, :map, default: %{})
     field(:current_step, :string)
     field(:error, :map)
-    field(:retry_count, :integer, default: 0)
-    field(:last_retried_at, :utc_datetime_usec)
     field(:parent_workflow_id, :binary_id)
     field(:scheduled_at, :utc_datetime_usec)
     field(:started_at, :utc_datetime_usec)
     field(:completed_at, :utc_datetime_usec)
     field(:locked_by, :string)
     field(:locked_at, :utc_datetime_usec)
+    # Per-claim fencing token (fresh UUID stamped on each claim). Lets a worker
+    # detect its claim was superseded by stale-lock recovery + reclaim.
+    field(:lock_token, :binary_id)
 
     # Compensation/Saga support
     field(:compensation_results, {:array, :map}, default: [])
@@ -101,8 +100,6 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :context,
     :current_step,
     :error,
-    :retry_count,
-    :last_retried_at,
     :parent_workflow_id,
     :scheduled_at,
     :started_at,
