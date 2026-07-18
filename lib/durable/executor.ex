@@ -375,7 +375,7 @@ defmodule Durable.Executor do
         handle_call_workflow(config, exec, opts)
 
       {:error, error} ->
-        handle_step_failure(exec, error, workflow_def, config)
+        handle_step_failure(exec, normalize_error(error), workflow_def, config)
     end
   end
 
@@ -648,7 +648,7 @@ defmodule Durable.Executor do
         handle_call_workflow(config, exec, opts)
 
       {:error, error} ->
-        handle_step_failure(exec, error, workflow_def, config)
+        handle_step_failure(exec, normalize_error(error), workflow_def, config)
     end
   end
 
