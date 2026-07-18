@@ -83,6 +83,12 @@ defmodule Durable.Migration do
   @spec all_versions() :: [pos_integer()]
   defdelegate all_versions(), to: Migrator
 
+  @spec current_version() :: pos_integer()
+  defdelegate current_version(), to: Migrator
+
+  @spec previous_version(pos_integer()) :: non_neg_integer()
+  defdelegate previous_version(version \\ Migrator.current_version()), to: Migrator
+
   @doc """
   Returns the list of applied migration versions.
 
@@ -91,9 +97,24 @@ defmodule Durable.Migration do
   @spec migrated_versions(keyword()) :: [pos_integer()]
   defdelegate migrated_versions(opts \\ []), to: Migrator
 
+  @spec migrated_version(keyword() | module()) :: non_neg_integer()
+  def migrated_version(opts_or_repo \\ [])
+
+  def migrated_version(opts) when is_list(opts), do: Migrator.migrated_version(opts)
+  def migrated_version(repo) when is_atom(repo), do: Migrator.migrated_version(repo)
+
+  @spec migrated_version(module(), keyword()) :: non_neg_integer()
+  defdelegate migrated_version(repo, opts), to: Migrator
+
   @doc """
   Returns pending migrations (not yet applied).
   """
   @spec pending_versions(keyword()) :: [pos_integer()]
-  defdelegate pending_versions(opts \\ []), to: Migrator
+  def pending_versions(opts_or_repo \\ [])
+
+  def pending_versions(opts) when is_list(opts), do: Migrator.pending_versions(opts)
+  def pending_versions(repo) when is_atom(repo), do: Migrator.pending_versions(repo)
+
+  @spec pending_versions(module(), keyword()) :: [pos_integer()]
+  defdelegate pending_versions(repo, opts), to: Migrator
 end

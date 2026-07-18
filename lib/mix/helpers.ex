@@ -11,6 +11,14 @@ defmodule Durable.Mix.Helpers do
   end
 
   @doc """
+  Starts the application with queue processing disabled for diagnostic tasks.
+  """
+  def ensure_started_readonly do
+    Application.put_env(:durable, :disable_queue_processing, true)
+    Mix.Task.run("app.start")
+  end
+
+  @doc """
   Parses --name option, returns Durable instance name atom.
   """
   def get_durable_name(opts) do
@@ -116,5 +124,38 @@ defmodule Durable.Mix.Helpers do
   """
   def strip_elixir_prefix(module_str) when is_binary(module_str) do
     String.replace_prefix(module_str, "Elixir.", "")
+  end
+
+  import Ecto.Query
+
+  def resolve_workflow_id(durable_name, input) when is_binary(input) do
+    config = Durable.Config.get(durable_name)
+    trimmed = String.trim(input)
+
+    if valid_uuid?(trimmed) do
+      case Durable.Repo.get(config, Durable.Storage.Schemas.WorkflowExecution, trimmed) do
+        nil -> {:error, :not_found}
+        execution -> {:ok, execution.id}
+      end
+    else
+      resolve_by_prefix(config, trimmed)
+    end
+  end
+
+  defp valid_uuid?(value), do: match?({:ok, _}, Ecto.UUID.cast(value))
+
+  defp resolve_by_prefix(config, prefix) do
+    query =
+      from(workflow in Durable.Storage.Schemas.WorkflowExecution,
+        where: fragment("?::text LIKE ?", workflow.id, ^(prefix <> "%")),
+        select: workflow.id,
+        limit: 10
+      )
+
+    case Durable.Repo.all(config, query) do
+      [] -> {:error, :not_found}
+      [id] -> {:ok, id}
+      ids -> {:error, :ambiguous, ids}
+    end
   end
 end

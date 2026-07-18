@@ -225,13 +225,14 @@ defmodule Durable.Wait.TimeoutWorker do
                 "#{stage} → #{inspect(reason)}"
             )
         end
-      :resume ->
-            timeout_value = deserialize_timeout_value(pending_event.timeout_value)
 
-            resume_data = %{
-              pending_event.event_name => timeout_value,
-              :__timeout__ => true
-            }
+      :resume ->
+        timeout_value = deserialize_timeout_value(pending_event.timeout_value)
+
+        resume_data = %{
+          pending_event.event_name => timeout_value,
+          :__timeout__ => true
+        }
 
         case atomic_claim_and_resume_event_timeout(config, pending_event, resume_data) do
           {:ok, _} ->
@@ -239,6 +240,7 @@ defmodule Durable.Wait.TimeoutWorker do
               "Timeout handled for pending event #{pending_event.event_name} " <>
                 "in workflow #{pending_event.workflow_id} (resume)"
             )
+
             maybe_cancel_timed_out_child(config, pending_event.event_name)
 
           {:error, :pending, :not_found, _changes} ->
@@ -273,6 +275,37 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp maybe_cancel_timed_out_child(_config, _event_name), do: :ok
+
+  defp atomic_resume_after_timeout(config, pending_changeset, workflow_id, resume_data) do
+    safe_resume = Executor.sanitize_for_json(resume_data)
+
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(:pending, pending_changeset)
+      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
+        case repo.get(WorkflowExecution, workflow_id) do
+          nil ->
+            {:error, :workflow_not_found}
+
+          %WorkflowExecution{status: :waiting} = exec ->
+            new_context = Map.merge(exec.context || %{}, safe_resume)
+
+            exec
+            |> Ecto.Changeset.change(
+              context: new_context,
+              status: :pending,
+              locked_by: nil,
+              locked_at: nil
+            )
+            |> repo.update()
+
+          %WorkflowExecution{status: status} ->
+            {:ok, %{status: status, no_op: true}}
+        end
+      end)
+
+    Repo.transaction(config, multi)
+  end
 
   # Atomically claim the pending event as :timeout and flip the
   # owning workflow back to :pending with the timeout payload merged into
