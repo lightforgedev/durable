@@ -26,6 +26,8 @@ defmodule Durable.Executor do
 
   require Logger
 
+  @max_manual_retries 3
+
   @doc """
   Starts a new workflow execution.
 
@@ -177,6 +179,93 @@ defmodule Durable.Executor do
 
       {:ok, workflow_id}
     end
+  end
+
+  @doc """
+  Retries a failed workflow from its failed step.
+
+  The workflow keeps its original execution ID, input, persisted context, and
+  completed step executions. `current_step` remains the failed step, so the
+  executor skips every completed predecessor and runs only that step and its
+  downstream path.
+
+  ## Options
+
+  - `:inline` - If true, execute synchronously instead of via queue (default: false)
+  - `:durable` - The Durable instance name (default: Durable)
+  """
+  @spec retry_workflow(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def retry_workflow(workflow_id, opts \\ []) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    config = Config.get(durable_name)
+
+    with {:ok, execution, retry_started?} <- mark_failed_execution_pending(config, workflow_id) do
+      if retry_started? do
+        if Keyword.get(opts, :inline, false) do
+          execute_workflow(workflow_id, config)
+        else
+          QueueManager.wake(durable_name, execution.queue)
+        end
+      end
+
+      {:ok, workflow_id}
+    end
+  end
+
+  defp mark_failed_execution_pending(config, workflow_id) do
+    query =
+      from(execution in WorkflowExecution,
+        where: execution.id == ^workflow_id,
+        lock: "FOR UPDATE"
+      )
+
+    case config.repo.transaction(fn ->
+           config
+           |> Repo.one(query)
+           |> retry_locked_execution(config)
+         end) do
+      {:ok, {:ok, execution}} -> {:ok, execution, true}
+      {:ok, {:already_retried, execution}} -> {:ok, execution, false}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp retry_locked_execution(nil, _config), do: {:error, :not_found}
+
+  # A retry request is idempotent while the retry it initiated is queued or running.
+  # The row lock serializes callers: the first changes `:failed` to `:pending`; later
+  # callers receive the same execution receipt without enqueueing duplicate work.
+  defp retry_locked_execution(
+         %{status: status, last_retried_at: last_retried_at} = execution,
+         _config
+       )
+       when status in [:pending, :running] and not is_nil(last_retried_at),
+       do: {:already_retried, execution}
+
+  defp retry_locked_execution(%{status: status}, _config) when status != :failed,
+    do: {:error, :not_failed}
+
+  defp retry_locked_execution(%{current_step: nil}, _config), do: {:error, :no_failed_step}
+
+  defp retry_locked_execution(%{retry_count: count}, _config)
+       when count >= @max_manual_retries,
+       do: {:error, :retry_limit_reached}
+
+  defp retry_locked_execution(execution, config) do
+    retry_count = execution.retry_count || 0
+
+    execution
+    |> Ecto.Changeset.change(
+      status: :pending,
+      error: nil,
+      completed_at: nil,
+      locked_by: nil,
+      locked_at: nil,
+      retry_count: retry_count + 1,
+      last_retried_at: DateTime.utc_now()
+    )
+    |> Repo.update(config)
   end
 
   # Private functions
@@ -351,7 +440,8 @@ defmodule Durable.Executor do
       {wait_type, opts}
       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
         # Save current data before waiting
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         handle_wait_result(config, exec, wait_type, opts)
 
       {:call_workflow, opts} ->
@@ -406,6 +496,13 @@ defmodule Durable.Executor do
 
   defp handle_wait_result(config, exec, :call_workflow, opts),
     do: handle_call_workflow(config, exec, opts)
+
+  defp pop_wait_context(opts, fallback_data) do
+    case Keyword.pop(opts, :__durable_context) do
+      {context, opts} when is_map(context) -> {opts, context}
+      {_context, opts} -> {opts, fallback_data}
+    end
+  end
 
   # ============================================================================
   # Workflow Orchestration (call_workflow)
@@ -601,23 +698,28 @@ defmodule Durable.Executor do
         {:decision, exec, target_step, new_data}
 
       {:sleep, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_sleep(config, exec, opts) |> elem(1)}
 
       {:wait_for_event, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_event(config, exec, opts) |> elem(1)}
 
       {:wait_for_input, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_input(config, exec, opts) |> elem(1)}
 
       {:wait_for_any, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_any(config, exec, opts) |> elem(1)}
 
       {:wait_for_all, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
+        {opts, wait_data} = pop_wait_context(opts, data)
+        {:ok, exec} = save_data_as_context(config, exec, wait_data)
         {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
 
       {:call_workflow, opts} ->
@@ -797,7 +899,8 @@ defmodule Durable.Executor do
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
-          {:ok, exec} = save_data_as_context(config, execution, data)
+          {wait_opts, wait_data} = pop_wait_context(wait_opts, data)
+          {:ok, exec} = save_data_as_context(config, execution, wait_data)
           handle_wait_result(config, exec, wait_type, wait_opts)
 
         {:call_workflow, call_opts} ->
@@ -1130,10 +1233,13 @@ defmodule Durable.Executor do
   end
 
   defp mark_failed(config, execution, error) do
+    context = current_context_or_existing(execution.context)
+
     {:ok, execution} =
       execution
       |> WorkflowExecution.status_changeset(:failed, %{
         error: error,
+        context: context,
         completed_at: DateTime.utc_now()
       })
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
@@ -1142,6 +1248,13 @@ defmodule Durable.Executor do
     maybe_notify_parent(config, execution, :failed, error)
 
     {:error, error}
+  end
+
+  defp current_context_or_existing(existing_context) do
+    case Process.get(:durable_context, :__durable_context_missing__) do
+      context when is_map(context) -> merge_orchestration_context(context)
+      _ -> existing_context || %{}
+    end
   end
 
   # ============================================================================

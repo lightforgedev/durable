@@ -150,7 +150,7 @@ defmodule Durable.Executor.StepRunner do
             ] do
     %{step_exec: step_exec, config: config} = ctx
     {:ok, _} = update_step_execution(config, step_exec, :waiting)
-    {wait_type, opts}
+    {wait_type, Keyword.put(opts, :__durable_context, Context.context())}
   end
 
   # Handle errors with retry

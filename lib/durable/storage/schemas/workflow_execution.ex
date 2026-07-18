@@ -31,6 +31,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           context: map(),
           current_step: String.t() | nil,
           error: map() | nil,
+          retry_count: non_neg_integer(),
+          last_retried_at: DateTime.t() | nil,
           parent_workflow_id: Ecto.UUID.t() | nil,
           scheduled_at: DateTime.t() | nil,
           started_at: DateTime.t() | nil,
@@ -71,6 +73,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:context, :map, default: %{})
     field(:current_step, :string)
     field(:error, :map)
+    field(:retry_count, :integer, default: 0)
+    field(:last_retried_at, :utc_datetime_usec)
     field(:parent_workflow_id, :binary_id)
     field(:scheduled_at, :utc_datetime_usec)
     field(:started_at, :utc_datetime_usec)
@@ -97,6 +101,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :context,
     :current_step,
     :error,
+    :retry_count,
+    :last_retried_at,
     :parent_workflow_id,
     :scheduled_at,
     :started_at,

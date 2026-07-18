@@ -41,6 +41,21 @@ defmodule Durable.ErrorNormalizationTest do
     end
   end
 
+  defmodule ContextThenErrorWorkflow do
+    use Durable
+
+    workflow "context_then_error" do
+      step(:boom, fn _ ->
+        Durable.Context.put_context(:failure_evidence, %{
+          "reason" => "review_not_passed",
+          "pr_url" => "https://github.com/lightforgedev/aegis-api-phoenix/pull/2610"
+        })
+
+        {:error, :review_not_passed}
+      end)
+    end
+  end
+
   test "atom errors are normalized into a map before persistence" do
     execution = run_workflow(AtomErrorWorkflow)
     assert execution.status == :failed
@@ -60,6 +75,18 @@ defmodule Durable.ErrorNormalizationTest do
     assert execution.status == :failed
     assert is_map(execution.error)
     assert execution.error["message"] == "nope"
+  end
+
+  test "context written before a step error is persisted on the failed execution" do
+    execution = run_workflow(ContextThenErrorWorkflow)
+
+    assert execution.status == :failed
+    assert execution.error["message"] == "review_not_passed"
+
+    assert execution.context["failure_evidence"] == %{
+             "reason" => "review_not_passed",
+             "pr_url" => "https://github.com/lightforgedev/aegis-api-phoenix/pull/2610"
+           }
   end
 
   defp run_workflow(module) do

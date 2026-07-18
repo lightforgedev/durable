@@ -59,7 +59,9 @@ defmodule Durable.ContextInputTest do
     _ = Executor.execute_workflow(execution.id, config)
     reloaded = repo.get!(WorkflowExecution, execution.id)
 
-    assert reloaded.status == :completed, "expected :completed, got error=#{inspect(reloaded.error)}"
+    assert reloaded.status == :completed,
+           "expected :completed, got error=#{inspect(reloaded.error)}"
+
     assert Map.get(reloaded.context, "echoed") == "hello" or
              Map.get(reloaded.context, :echoed) == "hello"
   end
