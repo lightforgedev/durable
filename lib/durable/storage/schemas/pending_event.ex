@@ -22,6 +22,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
           payload: map() | nil,
           timeout_at: DateTime.t() | nil,
           timeout_value: term() | nil,
+          on_timeout: :resume | :fail,
           wait_group_id: Ecto.UUID.t() | nil,
           wait_type: wait_type(),
           parallel_id: integer() | nil,
@@ -47,6 +48,8 @@ defmodule Durable.Storage.Schemas.PendingEvent do
     field(:payload, :map)
     field(:timeout_at, :utc_datetime_usec)
     field(:timeout_value, :map)
+
+    field(:on_timeout, Ecto.Enum, values: [:resume, :fail], default: :resume)
 
     # For wait_for_any / wait_for_all patterns
     field(:wait_group_id, :binary_id)
@@ -74,6 +77,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
     :payload,
     :timeout_at,
     :timeout_value,
+    :on_timeout,
     :wait_group_id,
     :wait_type,
     :parallel_id,
