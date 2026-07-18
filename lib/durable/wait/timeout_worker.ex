@@ -9,7 +9,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   use GenServer
 
-  alias Durable.Repo
+  alias Durable.{Executor, Repo}
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup}
 
   import Ecto.Query
@@ -177,23 +177,37 @@ defmodule Durable.Wait.TimeoutWorker do
       |> PendingEvent.timeout_changeset()
       |> Repo.update(config)
 
-    # Resume workflow with timeout value
-    timeout_value = deserialize_timeout_value(pending_event.timeout_value)
+    case pending_event.on_timeout || :resume do
+      :fail ->
+        Executor.fail_workflow(
+          pending_event.workflow_id,
+          %{
+            type: "event_timeout",
+            message: "Timeout waiting for event: #{pending_event.event_name}",
+            event_name: pending_event.event_name,
+            step_name: pending_event.step_name
+          },
+          durable: config.name
+        )
 
-    resume_data = %{
-      pending_event.event_name => timeout_value,
-      :__timeout__ => true
-    }
+      :resume ->
+        timeout_value = deserialize_timeout_value(pending_event.timeout_value)
 
-    Durable.Executor.resume_workflow(
-      pending_event.workflow_id,
-      resume_data,
-      durable: config.name
-    )
+        resume_data = %{
+          pending_event.event_name => timeout_value,
+          :__timeout__ => true
+        }
+
+        Executor.resume_workflow(
+          pending_event.workflow_id,
+          resume_data,
+          durable: config.name
+        )
+    end
 
     Logger.info(
       "Timeout handled for pending event #{pending_event.event_name} " <>
-        "in workflow #{pending_event.workflow_id}"
+        "in workflow #{pending_event.workflow_id} (#{pending_event.on_timeout || :resume})"
     )
   end
 
