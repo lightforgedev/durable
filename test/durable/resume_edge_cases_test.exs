@@ -285,6 +285,33 @@ defmodule Durable.ResumeEdgeCasesTest do
       assert {:error, :not_failed} = Durable.retry(execution.id)
     end
 
+    test "returns the same receipt without a second wake when a retry is already queued" do
+      config = Config.get(Durable)
+      repo = config.repo
+      {:ok, workflow_def} = FailedStepRetryWorkflow.__default_workflow__()
+
+      {:ok, execution} =
+        %WorkflowExecution{}
+        |> WorkflowExecution.changeset(%{
+          workflow_module: Atom.to_string(FailedStepRetryWorkflow),
+          workflow_name: workflow_def.name,
+          status: :pending,
+          queue: "default",
+          priority: 0,
+          input: %{},
+          context: %{},
+          current_step: "step2",
+          retry_count: 1,
+          last_retried_at: DateTime.utc_now()
+        })
+        |> repo.insert()
+
+      execution_id = execution.id
+      assert {:ok, ^execution_id} = Durable.retry(execution.id, inline: true)
+      refute_received :failed_step_retry_step2
+      assert repo.get!(WorkflowExecution, execution.id).retry_count == 1
+    end
+
     test "bounds retries for a failed workflow" do
       config = Config.get(Durable)
       repo = config.repo

@@ -199,11 +199,13 @@ defmodule Durable.Executor do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
-    with {:ok, execution} <- mark_failed_execution_pending(config, workflow_id) do
-      if Keyword.get(opts, :inline, false) do
-        execute_workflow(workflow_id, config)
-      else
-        QueueManager.wake(durable_name, execution.queue)
+    with {:ok, execution, retry_started?} <- mark_failed_execution_pending(config, workflow_id) do
+      if retry_started? do
+        if Keyword.get(opts, :inline, false) do
+          execute_workflow(workflow_id, config)
+        else
+          QueueManager.wake(durable_name, execution.queue)
+        end
       end
 
       {:ok, workflow_id}
@@ -222,13 +224,24 @@ defmodule Durable.Executor do
            |> Repo.one(query)
            |> retry_locked_execution(config)
          end) do
-      {:ok, {:ok, execution}} -> {:ok, execution}
+      {:ok, {:ok, execution}} -> {:ok, execution, true}
+      {:ok, {:already_retried, execution}} -> {:ok, execution, false}
       {:ok, {:error, reason}} -> {:error, reason}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp retry_locked_execution(nil, _config), do: {:error, :not_found}
+
+  # A retry request is idempotent while the retry it initiated is queued or running.
+  # The row lock serializes callers: the first changes `:failed` to `:pending`; later
+  # callers receive the same execution receipt without enqueueing duplicate work.
+  defp retry_locked_execution(
+         %{status: status, last_retried_at: last_retried_at} = execution,
+         _config
+       )
+       when status in [:pending, :running] and not is_nil(last_retried_at),
+       do: {:already_retried, execution}
 
   defp retry_locked_execution(%{status: status}, _config) when status != :failed,
     do: {:error, :not_failed}
