@@ -95,10 +95,15 @@ defmodule Durable.Supervisor do
     # Task supervisor for parallel step execution
     task_sup_name = task_supervisor_name(config.name)
 
-    # Base children always include the task supervisor
-    base_children = [
-      {Task.Supervisor, name: task_sup_name}
-    ]
+    pubsub_children =
+      if config.owns_pubsub? do
+        check_pubsub_dependency!(config)
+        [{Phoenix.PubSub, name: config.pubsub}]
+      else
+        []
+      end
+
+    base_children = pubsub_children ++ [{Task.Supervisor, name: task_sup_name}]
 
     children =
       if config.queue_enabled do
@@ -110,6 +115,7 @@ defmodule Durable.Supervisor do
           [
             {Durable.Queue.Manager, config: config},
             {Durable.Wait.TimeoutWorker, config: config},
+            {Durable.Wait.SleepWaker, config: config},
             {Durable.Scheduler,
              config: config,
              interval: config.scheduler_interval,
@@ -121,6 +127,20 @@ defmodule Durable.Supervisor do
       end
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  defp check_pubsub_dependency!(%Config{name: name}) do
+    unless Code.ensure_loaded?(Phoenix.PubSub) do
+      raise """
+      Durable instance #{inspect(name)} was configured with `pubsub: :start` but
+      `:phoenix_pubsub` is not available. Add it to your dependencies:
+
+          {:phoenix_pubsub, "~> 2.1"}
+
+      Or pass `pubsub: MyApp.PubSub` to reuse a PubSub already started by the
+      host application, or omit `:pubsub` to disable broadcasting.
+      """
+    end
   end
 
   @doc """

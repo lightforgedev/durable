@@ -27,7 +27,12 @@ defmodule Durable.Queue.Adapter do
           input: map(),
           context: map(),
           scheduled_at: DateTime.t() | nil,
-          current_step: String.t() | nil
+          current_step: String.t() | nil,
+          # Per-claim fencing token stamped by `fetch_jobs`. Workers pass it back
+          # to `heartbeat`/`ack`/`nack` so a claim superseded by stale-lock
+          # recovery can be detected (heartbeat → `{:error, :fenced}`) and a
+          # late ack/nack from a fenced worker becomes a no-op.
+          lock_token: String.t() | nil
         }
 
   @doc """
@@ -103,6 +108,39 @@ defmodule Durable.Queue.Adapter do
   from releasing jobs that are still being processed.
   """
   @callback heartbeat(config :: Config.t(), job_id :: job_id()) :: :ok | {:error, term()}
+
+  @doc """
+  Recovers "zombie" workflows — executions stuck in `:waiting` status with
+  no pending inputs or events that could ever unblock them.
+
+  This typically happens when a step crashes during a state transition and
+  the executor can't record a clean error (e.g. due to a secondary error
+  while serializing). The workflow remains in `:waiting` indefinitely even
+  though nothing is actually waiting on it.
+
+  Zombies older than the timeout are marked `:failed` with a diagnostic
+  error. Returns the count of workflows recovered.
+
+  This callback is optional so third-party adapters don't break on upgrade.
+  """
+  @callback recover_zombie_workflows(config :: Config.t(), timeout_seconds :: pos_integer()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+
+  @doc """
+  Wakes workflows whose `sleep/1` or `schedule_at/1` wait has elapsed.
+
+  Atomically transitions rows where `status = :waiting AND scheduled_at <= NOW()`
+  back to `:pending`, clears the lock, and merges a `__sleep_satisfied__`
+  marker into context so the step body's next `sleep`/`schedule_at` call
+  returns immediately instead of re-throwing.
+
+  Returns the count of workflows woken. Optional so older adapters keep
+  working — when not implemented, the SleepWaker simply skips its sweep.
+  """
+  @callback wake_sleeping_workflows(config :: Config.t(), batch_size :: pos_integer()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+
+  @optional_callbacks recover_zombie_workflows: 2, wake_sleeping_workflows: 2
 
   @doc """
   Returns the default adapter module.
