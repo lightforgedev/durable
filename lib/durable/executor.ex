@@ -26,6 +26,8 @@ defmodule Durable.Executor do
 
   require Logger
 
+  @max_manual_retries 3
+
   @doc """
   Starts a new workflow execution.
 
@@ -177,6 +179,80 @@ defmodule Durable.Executor do
 
       {:ok, workflow_id}
     end
+  end
+
+  @doc """
+  Retries a failed workflow from its failed step.
+
+  The workflow keeps its original execution ID, input, persisted context, and
+  completed step executions. `current_step` remains the failed step, so the
+  executor skips every completed predecessor and runs only that step and its
+  downstream path.
+
+  ## Options
+
+  - `:inline` - If true, execute synchronously instead of via queue (default: false)
+  - `:durable` - The Durable instance name (default: Durable)
+  """
+  @spec retry_workflow(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def retry_workflow(workflow_id, opts \\ []) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    config = Config.get(durable_name)
+
+    with {:ok, execution} <- mark_failed_execution_pending(config, workflow_id) do
+      if Keyword.get(opts, :inline, false) do
+        execute_workflow(workflow_id, config)
+      else
+        QueueManager.wake(durable_name, execution.queue)
+      end
+
+      {:ok, workflow_id}
+    end
+  end
+
+  defp mark_failed_execution_pending(config, workflow_id) do
+    query =
+      from(execution in WorkflowExecution,
+        where: execution.id == ^workflow_id,
+        lock: "FOR UPDATE"
+      )
+
+    case config.repo.transaction(fn ->
+           config
+           |> Repo.one(query)
+           |> retry_locked_execution(config)
+         end) do
+      {:ok, {:ok, execution}} -> {:ok, execution}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp retry_locked_execution(nil, _config), do: {:error, :not_found}
+
+  defp retry_locked_execution(%{status: status}, _config) when status != :failed,
+    do: {:error, :not_failed}
+
+  defp retry_locked_execution(%{current_step: nil}, _config), do: {:error, :no_failed_step}
+
+  defp retry_locked_execution(%{retry_count: count}, _config)
+       when count >= @max_manual_retries,
+       do: {:error, :retry_limit_reached}
+
+  defp retry_locked_execution(execution, config) do
+    retry_count = execution.retry_count || 0
+
+    execution
+    |> Ecto.Changeset.change(
+      status: :pending,
+      error: nil,
+      completed_at: nil,
+      locked_by: nil,
+      locked_at: nil,
+      retry_count: retry_count + 1,
+      last_retried_at: DateTime.utc_now()
+    )
+    |> Repo.update(config)
   end
 
   # Private functions

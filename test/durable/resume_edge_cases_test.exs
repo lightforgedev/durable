@@ -227,6 +227,88 @@ defmodule Durable.ResumeEdgeCasesTest do
     end
   end
 
+  describe "retrying a failed workflow" do
+    test "re-executes only the failed step and retains the execution ID" do
+      config = Config.get(Durable)
+      repo = config.repo
+      {:ok, workflow_def} = FailedStepRetryWorkflow.__default_workflow__()
+
+      {:ok, execution} =
+        %WorkflowExecution{}
+        |> WorkflowExecution.changeset(%{
+          workflow_module: Atom.to_string(FailedStepRetryWorkflow),
+          workflow_name: workflow_def.name,
+          status: :failed,
+          queue: "default",
+          priority: 0,
+          input: %{},
+          context: %{"step1_done" => true},
+          current_step: "step2",
+          error: %{type: "transient", message: "retry me"},
+          completed_at: DateTime.utc_now()
+        })
+        |> repo.insert()
+
+      assert {:ok, retried_id} = Durable.retry(execution.id, inline: true)
+      assert retried_id == execution.id
+      assert_received :failed_step_retry_step2
+      refute_received :failed_step_retry_step1
+
+      retried = repo.get!(WorkflowExecution, execution.id)
+      assert retried.status == :completed
+      assert retried.error == nil
+      assert retried.retry_count == 1
+      assert retried.last_retried_at
+      assert retried.context["step1_done"]
+      assert retried.context["step2_done"]
+    end
+
+    test "rejects workflows that are not failed" do
+      config = Config.get(Durable)
+      repo = config.repo
+      {:ok, workflow_def} = FailedStepRetryWorkflow.__default_workflow__()
+
+      {:ok, execution} =
+        %WorkflowExecution{}
+        |> WorkflowExecution.changeset(%{
+          workflow_module: Atom.to_string(FailedStepRetryWorkflow),
+          workflow_name: workflow_def.name,
+          status: :completed,
+          queue: "default",
+          priority: 0,
+          input: %{},
+          context: %{},
+          current_step: nil
+        })
+        |> repo.insert()
+
+      assert {:error, :not_failed} = Durable.retry(execution.id)
+    end
+
+    test "bounds retries for a failed workflow" do
+      config = Config.get(Durable)
+      repo = config.repo
+      {:ok, workflow_def} = FailedStepRetryWorkflow.__default_workflow__()
+
+      {:ok, execution} =
+        %WorkflowExecution{}
+        |> WorkflowExecution.changeset(%{
+          workflow_module: Atom.to_string(FailedStepRetryWorkflow),
+          workflow_name: workflow_def.name,
+          status: :failed,
+          queue: "default",
+          priority: 0,
+          input: %{},
+          context: %{},
+          current_step: "step2",
+          retry_count: 3
+        })
+        |> repo.insert()
+
+      assert {:error, :retry_limit_reached} = Durable.retry(execution.id)
+    end
+  end
+
   # ============================================================================
   # Helper Functions
   # ============================================================================
@@ -279,6 +361,22 @@ defmodule MultiStepResumableWorkflow do
 
     step(:step4, fn data ->
       {:ok, assign(data, :step4_value, "d")}
+    end)
+  end
+end
+
+defmodule FailedStepRetryWorkflow do
+  use Durable
+
+  workflow "failed_step_retry" do
+    step(:step1, fn data ->
+      send(self(), :failed_step_retry_step1)
+      {:ok, Map.put(data, "step1_done", true)}
+    end)
+
+    step(:step2, fn data ->
+      send(self(), :failed_step_retry_step2)
+      {:ok, Map.put(data, "step2_done", true)}
     end)
   end
 end

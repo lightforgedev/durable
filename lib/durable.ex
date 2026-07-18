@@ -259,6 +259,23 @@ defmodule Durable do
   end
 
   @doc """
+  Retries a failed workflow from its failed step without re-running completed steps.
+
+  The original execution is resumed in place: its ID, input, saved context, and
+  completed step history are retained. The failed step and any downstream steps
+  run again.
+
+  ## Options
+
+  - `:inline` - If true, execute synchronously instead of via queue (default: false)
+  - `:durable` - Durable instance name (default: Durable)
+  """
+  @spec retry(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def retry(workflow_id, opts \\ []) do
+    Durable.Executor.retry_workflow(workflow_id, opts)
+  end
+
+  @doc """
   Provides input for a waiting workflow (human-in-the-loop).
 
   ## Examples

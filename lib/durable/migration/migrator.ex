@@ -15,7 +15,8 @@ defmodule Durable.Migration.Migrator do
   @migrations [
     Durable.Migration.Migrations.V20260103000000InitialSchema,
     Durable.Migration.Migrations.V20260104000000AddWaitPrimitives,
-    Durable.Migration.Migrations.V20260609000000AddStepExecutionSessionId
+    Durable.Migration.Migrations.V20260609000000AddStepExecutionSessionId,
+    Durable.Migration.Migrations.V20260718000000AddWorkflowRetryMetadata
   ]
 
   @doc """

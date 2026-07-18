@@ -84,7 +84,7 @@ defmodule Durable.SchedulerTest do
       {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *")
 
       assert schedule.name == "simple"
-      assert schedule.workflow_module == "Durable.SchedulerTest.SimpleWorkflow"
+      assert schedule.workflow_module == Atom.to_string(SimpleWorkflow)
       assert schedule.workflow_name == "simple"
       assert schedule.cron_expression == "0 9 * * *"
       assert schedule.timezone == "UTC"
