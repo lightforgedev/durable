@@ -261,6 +261,13 @@ defmodule Durable.Executor do
     end
   end
 
+  @doc false
+  @spec publish_workflow_failure(Config.t(), WorkflowExecution.t(), map()) :: :ok
+  def publish_workflow_failure(%Config{} = config, %WorkflowExecution{} = execution, error) do
+    DurablePubSub.broadcast_workflow(config, :workflow_failed, workflow_event(execution))
+    maybe_notify_parent(config, execution, :failed, error)
+  end
+
   defp mark_failed_execution_pending(config, workflow_id) do
     query =
       from(execution in WorkflowExecution,
@@ -1387,8 +1394,7 @@ defmodule Durable.Executor do
 
     case result do
       {:ok, execution} ->
-        DurablePubSub.broadcast_workflow(config, :workflow_failed, workflow_event(execution))
-        maybe_notify_parent(config, execution, :failed, safe_error)
+        publish_workflow_failure(config, execution, safe_error)
         {:error, safe_error}
 
       {:error, changeset} ->

@@ -707,10 +707,21 @@ defmodule Durable.Wait do
          resume_payload
        ) do
     Ecto.Multi.new()
-    |> Ecto.Multi.update(
-      :event,
-      PendingEvent.receive_changeset(pending_event, storable_payload)
-    )
+    |> Ecto.Multi.run(:event, fn repo, _changes ->
+      query = from(p in PendingEvent, where: p.id == ^pending_event.id and p.status == :pending)
+
+      case repo.update_all(query,
+             set: [
+               status: :received,
+               payload: storable_payload,
+               completed_at: DateTime.utc_now(),
+               updated_at: DateTime.utc_now()
+             ]
+           ) do
+        {1, _} -> {:ok, pending_event}
+        {0, _} -> {:error, :not_found}
+      end
+    end)
     |> Ecto.Multi.run(:resume, fn repo, _ ->
       resume_after_event(repo, workflow_id, event_name, pending_event, resume_payload)
     end)
