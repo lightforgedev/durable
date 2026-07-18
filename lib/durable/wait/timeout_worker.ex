@@ -195,32 +195,62 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_event_timeout(config, pending_event) do
-    timeout_value = deserialize_timeout_value(pending_event.timeout_value)
+    case pending_event.on_timeout || :resume do
+      :fail ->
+        error = %{
+          type: "event_timeout",
+          message: "Timeout waiting for event: #{pending_event.event_name}",
+          event_name: pending_event.event_name,
+          step_name: pending_event.step_name
+        }
 
-    resume_data = %{
-      pending_event.event_name => timeout_value,
-      :__timeout__ => true
-    }
+        case atomic_fail_after_timeout(
+               config,
+               PendingEvent.timeout_changeset(pending_event),
+               pending_event.workflow_id,
+               error
+             ) do
+          {:ok, _} ->
+            Logger.info(
+              "Timeout handled for pending event #{pending_event.event_name} " <>
+                "in workflow #{pending_event.workflow_id} (fail)"
+            )
 
-    case atomic_resume_after_timeout(
-           config,
-           PendingEvent.timeout_changeset(pending_event),
-           pending_event.workflow_id,
-           resume_data
-         ) do
-      {:ok, _} ->
-        Logger.info(
-          "Timeout handled for pending event #{pending_event.event_name} " <>
-            "in workflow #{pending_event.workflow_id}"
-        )
+          {:error, stage, reason, _changes} ->
+            Logger.error(
+              "Failed event timeout transaction for #{pending_event.workflow_id}: " <>
+                "#{stage} → #{inspect(reason)}"
+            )
+        end
 
-        maybe_cancel_timed_out_child(config, pending_event.event_name)
+      :resume ->
+        timeout_value = deserialize_timeout_value(pending_event.timeout_value)
 
-      {:error, stage, reason, _changes} ->
-        Logger.error(
-          "Failed event timeout transaction for #{pending_event.workflow_id}: " <>
-            "#{stage} → #{inspect(reason)}"
-        )
+        resume_data = %{
+          pending_event.event_name => timeout_value,
+          :__timeout__ => true
+        }
+
+        case atomic_resume_after_timeout(
+               config,
+               PendingEvent.timeout_changeset(pending_event),
+               pending_event.workflow_id,
+               resume_data
+             ) do
+          {:ok, _} ->
+            Logger.info(
+              "Timeout handled for pending event #{pending_event.event_name} " <>
+                "in workflow #{pending_event.workflow_id} (resume)"
+            )
+
+            maybe_cancel_timed_out_child(config, pending_event.event_name)
+
+          {:error, stage, reason, _changes} ->
+            Logger.error(
+              "Failed event timeout transaction for #{pending_event.workflow_id}: " <>
+                "#{stage} → #{inspect(reason)}"
+            )
+        end
     end
   end
 
@@ -278,6 +308,32 @@ defmodule Durable.Wait.TimeoutWorker do
             # before the timeout sweep ran). Tolerate this — the pending
             # row is still marked :timeout via the Multi above, which is
             # the right outcome.
+            {:ok, %{status: status, no_op: true}}
+        end
+      end)
+
+    Repo.transaction(config, multi)
+  end
+
+  defp atomic_fail_after_timeout(config, pending_changeset, workflow_id, error) do
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(:pending, pending_changeset)
+      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
+        case repo.get(WorkflowExecution, workflow_id) do
+          nil ->
+            {:error, :workflow_not_found}
+
+          %WorkflowExecution{status: :waiting} = exec ->
+            exec
+            |> WorkflowExecution.status_changeset(:failed, %{
+              error: Executor.sanitize_for_json(error),
+              completed_at: DateTime.utc_now()
+            })
+            |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+            |> repo.update()
+
+          %WorkflowExecution{status: status} ->
             {:ok, %{status: status, no_op: true}}
         end
       end)

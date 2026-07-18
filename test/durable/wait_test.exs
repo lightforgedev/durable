@@ -17,6 +17,7 @@ defmodule Durable.WaitTest do
   alias Durable.Executor
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
   alias Durable.Wait
+  alias Durable.Wait.TimeoutWorker
 
   import Ecto.Query
 
@@ -312,6 +313,16 @@ defmodule Durable.WaitTest do
       # Timeout should be ~1 hour in the future (hours(1))
       diff_ms = DateTime.diff(pending.timeout_at, before, :millisecond)
       assert diff_ms >= 3_500_000 and diff_ms <= 3_700_000
+    end
+
+    test "on_timeout: :fail records the timeout mode" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(FailOnTimeoutEventWorkflow, %{})
+
+      pending = get_pending_event(repo, execution.id, "final_checks.completed")
+      assert pending.on_timeout == :fail
     end
 
     test "resumes when event is sent via send_event/4" do
@@ -805,12 +816,54 @@ defmodule Durable.WaitTest do
   # TimeoutWorker Tests
   # ============================================================================
 
-  # Note: TimeoutWorker is not started when queue_enabled: false (test mode)
-  # These tests would require starting Durable with queue_enabled: true
-  # or manually starting the TimeoutWorker
-  #
-  # The TimeoutWorker functionality is tested indirectly through integration tests
-  # when the full queue system is running
+  describe "event timeout failure" do
+    test "fails the waiting workflow instead of resuming it with a timeout value" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(FailOnTimeoutEventWorkflow, %{})
+      workflow_id = execution.id
+
+      pending = get_pending_event(repo, execution.id, "final_checks.completed")
+
+      pending
+      |> Ecto.Changeset.change(timeout_at: DateTime.add(DateTime.utc_now(), -1, :second))
+      |> repo.update!()
+
+      assert {:noreply, _state} = TimeoutWorker.handle_cast(:check_timeouts, %{config: config})
+
+      failed = repo.get!(WorkflowExecution, execution.id)
+      assert failed.status == :failed
+      assert failed.current_step == "wait_step"
+      assert failed.error["type"] == "event_timeout"
+      assert failed.error["event_name"] == "final_checks.completed"
+
+      pending = get_pending_event(repo, execution.id, "final_checks.completed")
+      assert pending.status == :timeout
+
+      assert {:ok, ^workflow_id} =
+               Executor.retry_workflow(workflow_id, durable: Durable, inline: true)
+
+      retried = repo.get!(WorkflowExecution, workflow_id)
+      assert retried.status == :waiting
+      assert retried.current_step == "wait_step"
+
+      assert [%{status: :pending}] =
+               repo.all(
+                 from(p in PendingEvent,
+                   where:
+                     p.workflow_id == ^workflow_id and
+                       p.event_name == "final_checks.completed" and
+                       p.status == :pending
+                 )
+               )
+
+      :ok = Wait.send_event(workflow_id, "final_checks.completed", %{"conclusion" => "success"})
+      {:ok, _} = Executor.execute_workflow(workflow_id, config)
+
+      assert %{status: :completed} = repo.get!(WorkflowExecution, workflow_id)
+    end
+  end
 
   # ============================================================================
   # Time Helpers Tests
@@ -1336,6 +1389,25 @@ defmodule EventWaitTestWorkflow do
         wait_for_event("payment_confirmed",
           timeout: hours(1),
           timeout_value: :timed_out
+        )
+
+      {:ok, assign(data, :result, result)}
+    end)
+  end
+end
+
+defmodule FailOnTimeoutEventWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "fail_on_timeout_event" do
+    step(:wait_step, fn data ->
+      result =
+        wait_for_event("final_checks.completed",
+          timeout: hours(1),
+          timeout_value: %{"status" => "timed_out"},
+          on_timeout: :fail
         )
 
       {:ok, assign(data, :result, result)}
