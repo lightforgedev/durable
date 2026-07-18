@@ -85,6 +85,21 @@ defmodule Durable.Queue.Poller do
   end
 
   @doc """
+  Schedules an immediate poll without changing pause/drain state.
+  """
+  @spec wake(GenServer.server()) :: :ok
+  def wake(server) when is_atom(server) do
+    case Process.whereis(server) do
+      nil -> :ok
+      _pid -> GenServer.cast(server, :wake)
+    end
+  end
+
+  def wake(server) do
+    GenServer.cast(server, :wake)
+  end
+
+  @doc """
   Drains the poller, waiting for all active jobs to complete.
 
   Returns `:ok` when all jobs are complete or `{:error, :timeout}` if
@@ -177,6 +192,11 @@ defmodule Durable.Queue.Poller do
     }
 
     {:reply, status, state}
+  end
+
+  @impl true
+  def handle_cast(:wake, state) do
+    {:noreply, schedule_poll(state, 0)}
   end
 
   @impl true
