@@ -1,15 +1,24 @@
 defmodule Durable.MixProject do
   use Mix.Project
 
-  @version "0.0.0-alpha"
-  @source_url "https://github.com/wavezync/durable"
-  @homepage_url "https://durable.wavezync.com"
+  # Lightforge distributes Durable as a standalone repository, unlike the
+  # upstream monorepo. Keep the package metadata beside mix.exs so every clone
+  # and Hex build is self-contained.
+  {shared, _bindings} = Code.eval_file(Path.join(__DIR__, "shared.exs"))
+
+  # Versioned independently of durable_dashboard.
+  @version "0.1.0-rc"
+  @elixir_requirement Keyword.fetch!(shared, :elixir)
+  @source_url Keyword.fetch!(shared, :source_url)
+  @homepage_url Keyword.fetch!(shared, :homepage_url)
+  @maintainers Keyword.fetch!(shared, :maintainers)
+  @licenses Keyword.fetch!(shared, :licenses)
 
   def project do
     [
       app: :durable,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: @elixir_requirement,
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
@@ -49,6 +58,7 @@ defmodule Durable.MixProject do
       {:nimble_options, "~> 1.1"},
       {:crontab, "~> 1.1"},
       {:igniter, "~> 0.6", optional: true},
+      {:phoenix_pubsub, "~> 2.1", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
@@ -83,6 +93,8 @@ defmodule Durable.MixProject do
       ],
       groups_for_modules: [
         "Mix Tasks": [
+          Mix.Tasks.Durable.Migrations,
+          Mix.Tasks.Durable.Gen.Upgrade,
           Mix.Tasks.Durable.Status,
           Mix.Tasks.Durable.List,
           Mix.Tasks.Durable.Run,
@@ -95,9 +107,10 @@ defmodule Durable.MixProject do
 
   defp package do
     [
-      licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE)
+      maintainers: @maintainers,
+      licenses: @licenses,
+      links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
+      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
     ]
   end
 end

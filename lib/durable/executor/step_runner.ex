@@ -12,10 +12,11 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.Context
   alias Durable.Definition.Step
   alias Durable.Executor.Backoff
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
-  require Logger
+  import Ecto.Query, only: [from: 2]
 
   @type result ::
           {:ok, map()}
@@ -43,16 +44,49 @@ defmodule Durable.Executor.StepRunner do
   @spec execute(Step.t(), map(), String.t(), Config.t()) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config) do
     max_attempts = get_max_attempts(step)
-    execute_with_retry(step, data, workflow_id, 1, max_attempts, config)
+    start_attempt = next_attempt(config, workflow_id, step)
+    execute_with_retry(step, data, workflow_id, start_attempt, max_attempts, config)
+  end
+
+  # Seed the retry counter from durable state instead of always starting at 1.
+  #
+  # The retry budget must survive a worker crash / stale-lock recovery: if a
+  # step is on attempt 3 of 5 when the node dies, the resumed run must continue
+  # at attempt 4 — not restart at 1 and re-run the side effect up to 5 more
+  # times (the previous behaviour silently exceeded max_attempts globally and
+  # contradicted the "durable/resumable" contract).
+  #
+  # We count `:failed` step_executions for (workflow_id, step_name), NOT the max
+  # attempt number: a `:waiting` row is a *suspension* (sleep/event), not a
+  # failed attempt, so it must not advance the retry counter. Each genuine retry
+  # writes exactly one `:failed` row, so `failed_count + 1` is the next attempt.
+  defp next_attempt(config, workflow_id, %Step{name: name}) do
+    step_name = Atom.to_string(name)
+
+    failed_count =
+      Repo.one(
+        config,
+        from(s in StepExecution,
+          where:
+            s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
+          select: count(s.id)
+        )
+      )
+
+    (failed_count || 0) + 1
   end
 
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config) do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
 
-    # Set current data in process dictionary for wait functions to access
-    # This is needed because wait_for_event etc. check the context for resumed data
-    Process.put(:durable_context, data)
+    # Set current data in process dictionary for wait functions to access.
+    # On retry attempts (attempt > 1) we MERGE rather than overwrite so that
+    # put_context/2 writes from the prior failed attempt remain visible to
+    # the user step body — matching the cumulative-context contract that
+    # save_data_as_context/3 enforces between sequential steps.
+    prior_ctx = if attempt > 1, do: Process.get(:durable_context, %{}), else: %{}
+    Process.put(:durable_context, Map.merge(prior_ctx, data))
 
     # Create step execution record
     {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
@@ -149,7 +183,11 @@ defmodule Durable.Executor.StepRunner do
               :call_workflow
             ] do
     %{step_exec: step_exec, config: config} = ctx
-    {:ok, _} = update_step_execution(config, step_exec, :waiting)
+    # A call_workflow throw carries the spawned child id — record it on this
+    # step's row so step→child is queryable (the parent context map is the
+    # fallback, not the source of truth).
+    child_id = if wait_type == :call_workflow, do: opts[:child_id], else: nil
+    {:ok, _} = update_step_execution(config, step_exec, :waiting, child_id)
     {wait_type, Keyword.put(opts, :__durable_context, Context.context())}
   end
 
@@ -246,39 +284,96 @@ defmodule Durable.Executor.StepRunner do
   end
 
   defp update_step_execution(config, step_exec, :running) do
-    step_exec
-    |> StepExecution.start_changeset()
-    |> Repo.update(config)
+    case step_exec
+         |> StepExecution.start_changeset()
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_started, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
-  defp update_step_execution(config, step_exec, :waiting) do
-    step_exec
-    |> Ecto.Changeset.change(status: :waiting)
-    |> Repo.update(config)
+  defp update_step_execution(config, step_exec, :waiting, child_id) do
+    changes =
+      if child_id, do: [status: :waiting, child_workflow_id: child_id], else: [status: :waiting]
+
+    case step_exec
+         |> Ecto.Changeset.change(changes)
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_waiting, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
   defp complete_step_execution(config, step_exec, output, logs, duration_ms) do
     serializable_output = serialize_output(output)
 
-    step_exec
-    |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-    |> Repo.update(config)
+    case step_exec
+         |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_completed, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
   defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
-    step_exec
-    |> StepExecution.fail_changeset(error, logs, duration_ms)
-    |> Repo.update(config)
+    # Sanitize the error map — exception payloads frequently carry tuples
+    # (e.g., FunctionClauseError args), PIDs, refs, and functions in the
+    # stacktrace area, none of which can survive a JSONB write. Mirror the
+    # defense applied to workflow-level mark_failed in lib/durable/executor.ex.
+    safe_error = Durable.Executor.sanitize_for_json(error)
+
+    case step_exec
+         |> StepExecution.fail_changeset(safe_error, logs, duration_ms)
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_failed, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
-  defp serialize_output(output) when is_map(output), do: output
-  defp serialize_output(output) when is_list(output), do: %{value: output}
-  defp serialize_output(output) when is_binary(output), do: %{value: output}
-  defp serialize_output(output) when is_number(output), do: %{value: output}
-  defp serialize_output(output) when is_atom(output), do: %{value: Atom.to_string(output)}
-  defp serialize_output(output) when is_tuple(output), do: %{value: Tuple.to_list(output)}
+  defp step_event(%StepExecution{} = step_exec) do
+    %{
+      id: step_exec.id,
+      workflow_id: step_exec.workflow_id,
+      step_name: step_exec.step_name,
+      step_type: step_exec.step_type,
+      status: step_exec.status,
+      attempt: step_exec.attempt,
+      duration_ms: step_exec.duration_ms,
+      started_at: step_exec.started_at,
+      completed_at: step_exec.completed_at
+    }
+  end
+
+  # Convert an arbitrary step output into a JSONB-safe map. The schema field
+  # is `:map`, so non-map outputs are wrapped under a `:value` key. Recursive
+  # sanitization handles deeply-nested tuples / PIDs / refs / functions —
+  # the previous shallow implementation only flattened top-level shapes and
+  # let nested tuples crash JSONB encoding.
   defp serialize_output(nil), do: nil
-  defp serialize_output(output), do: %{value: inspect(output)}
+
+  defp serialize_output(output) when is_map(output) do
+    Durable.Executor.sanitize_for_json(output)
+  end
+
+  defp serialize_output(output) do
+    %{value: Durable.Executor.sanitize_for_json(output)}
+  end
 
   # Normalize error to map format for database storage
   # The error field in StepExecution expects a map

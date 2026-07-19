@@ -22,6 +22,10 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
           enabled: boolean(),
           last_run_at: DateTime.t() | nil,
           next_run_at: DateTime.t() | nil,
+          last_error: String.t() | nil,
+          last_error_at: DateTime.t() | nil,
+          consecutive_failures: integer(),
+          auto_disabled_at: DateTime.t() | nil,
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -40,6 +44,10 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     field(:enabled, :boolean, default: true)
     field(:last_run_at, :utc_datetime_usec)
     field(:next_run_at, :utc_datetime_usec)
+    field(:last_error, :string)
+    field(:last_error_at, :utc_datetime_usec)
+    field(:consecutive_failures, :integer, default: 0)
+    field(:auto_disabled_at, :utc_datetime_usec)
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -51,7 +59,11 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     :queue,
     :enabled,
     :last_run_at,
-    :next_run_at
+    :next_run_at,
+    :last_error,
+    :last_error_at,
+    :consecutive_failures,
+    :auto_disabled_at
   ]
 
   @doc """
@@ -79,6 +91,50 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   def enable_changeset(scheduled_workflow, enabled) do
     scheduled_workflow
     |> cast(%{enabled: enabled}, [:enabled])
+  end
+
+  def failure_changeset(scheduled_workflow, error_message, opts \\ []) do
+    auto_disable_after = Keyword.get(opts, :auto_disable_after, 5)
+    next_run_at = Keyword.get(opts, :next_run_at)
+    now = DateTime.utc_now()
+    consecutive_failures = (scheduled_workflow.consecutive_failures || 0) + 1
+
+    attrs = %{
+      last_error: String.slice(to_string(error_message), 0, 1024),
+      last_error_at: now,
+      consecutive_failures: consecutive_failures,
+      next_run_at: next_run_at
+    }
+
+    attrs =
+      if consecutive_failures >= auto_disable_after do
+        attrs |> Map.put(:enabled, false) |> Map.put(:auto_disabled_at, now)
+      else
+        attrs
+      end
+
+    cast(scheduled_workflow, attrs, [
+      :last_error,
+      :last_error_at,
+      :consecutive_failures,
+      :enabled,
+      :auto_disabled_at,
+      :next_run_at
+    ])
+  end
+
+  def success_changeset(scheduled_workflow, last_run_at, next_run_at) do
+    cast(
+      scheduled_workflow,
+      %{
+        last_run_at: last_run_at,
+        next_run_at: next_run_at,
+        last_error: nil,
+        last_error_at: nil,
+        consecutive_failures: 0
+      },
+      [:last_run_at, :next_run_at, :last_error, :last_error_at, :consecutive_failures]
+    )
   end
 
   @doc """
