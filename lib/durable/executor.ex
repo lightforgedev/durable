@@ -310,6 +310,14 @@ defmodule Durable.Executor do
 
   defp retry_locked_execution(execution, config) do
     retry_count = execution.retry_count || 0
+    retry_epoch = retry_count + 1
+
+    # A retry must be distinguishable from the failed execution attempt while
+    # retaining its checkpoint. Runtime integrations use this persisted epoch
+    # to fence attempt-scoped external work (for example, an agent-session
+    # completion event). Without it, a resumed workflow can consume the
+    # failed attempt's terminal event again before the failed step runs.
+    context = Map.put(execution.context || %{}, "__durable_retry_epoch", retry_epoch)
 
     execution
     |> Ecto.Changeset.change(
@@ -318,7 +326,8 @@ defmodule Durable.Executor do
       completed_at: nil,
       locked_by: nil,
       locked_at: nil,
-      retry_count: retry_count + 1,
+      retry_count: retry_epoch,
+      context: context,
       last_retried_at: DateTime.utc_now()
     )
     |> Repo.update(config)
