@@ -259,6 +259,7 @@ defmodule Durable.ResumeEdgeCasesTest do
       assert retried.error == nil
       assert retried.retry_count == 1
       assert retried.last_retried_at
+      assert retried.context["__durable_retry_epoch"] == 1
       assert retried.context["step1_done"]
       assert retried.context["step2_done"]
     end
