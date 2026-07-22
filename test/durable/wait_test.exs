@@ -346,6 +346,26 @@ defmodule Durable.WaitTest do
       assert execution.status == :completed
       assert execution.context["result"] == %{"amount" => 99.99}
     end
+
+    @tag :supervised
+    test "wakes the queue after an event resumes a workflow" do
+      start_supervised_durable!()
+
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
+      assert execution.status == :waiting
+
+      assert :ok = Wait.send_event(execution.id, "payment_confirmed", %{"amount" => 99.99})
+
+      assert_eventually(fn ->
+        case repo.get!(WorkflowExecution, execution.id) do
+          %{status: :completed, context: %{"result" => %{"amount" => 99.99}}} -> true
+          _ -> false
+        end
+      end)
+    end
   end
 
   describe "wait_for_event/2 timeout_value sanitization (Bug C-2 regression)" do
