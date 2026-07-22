@@ -42,6 +42,7 @@ defmodule Durable.Wait do
 
   alias Durable.Config
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Queue.Manager, as: QueueManager
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
@@ -671,6 +672,14 @@ defmodule Durable.Wait do
         )
 
       case Repo.transaction(config, multi) do
+        {:ok, %{resume: %WorkflowExecution{queue: queue, status: :pending}}} ->
+          # `resume_parent_in_multi/3` must remain inside the event transaction
+          # so receipt + resume are atomic. Wake only after that transaction
+          # commits: otherwise a poller can observe the old waiting row, while
+          # omitting this wake leaves event-driven workflows pending forever.
+          QueueManager.wake(config.name, queue)
+          :ok
+
         {:ok, _} ->
           :ok
 
