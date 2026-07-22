@@ -89,6 +89,23 @@ defmodule Durable.OrchestrationTest do
       assert step.child_workflow_id == child_id
     end
 
+    test "callback failure removes the child before it can run" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(CallWorkflowCallbackFailureParent, %{})
+
+      assert parent.status == :completed
+      assert parent.context["callback_error"] == "child_start_callback_failed"
+
+      assert [] =
+               repo.all(
+                 from(child in WorkflowExecution,
+                   where: child.parent_workflow_id == ^parent.id
+                 )
+               )
+    end
+
     test "parent calls child, child fails, parent gets error" do
       config = Config.get(Durable)
       repo = config.repo
@@ -536,6 +553,24 @@ defmodule CallWorkflowFailingParent do
 
         {:error, _reason} ->
           {:ok, assign(data, :got_error, true)}
+      end
+    end)
+  end
+end
+
+defmodule CallWorkflowCallbackFailureParent do
+  use Durable
+  use Durable.Helpers
+  use Durable.Orchestration
+
+  workflow "call_callback_failure_parent" do
+    step(:call_child, fn data ->
+      case call_workflow(SimpleChildWorkflow, %{}, after_start: :invalid) do
+        {:error, {:child_start_callback_failed, _reason}} ->
+          {:ok, assign(data, :callback_error, "child_start_callback_failed")}
+
+        other ->
+          {:error, {:unexpected_callback_result, other}}
       end
     end)
   end
