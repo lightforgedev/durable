@@ -64,6 +64,9 @@ defmodule Durable.Orchestration do
   - `:timeout_value` - Value returned on timeout (default: `:child_timeout`)
   - `:queue` - Queue for the child workflow (default: "default")
   - `:durable` - Durable instance name (default: Durable)
+  - `:after_start` - callback invoked with the persisted child execution before it
+    is allowed to run. It must return `:ok` or `{:error, reason}`. A callback
+    failure deletes the child and fails the parent call.
 
   ## Examples
 
@@ -125,10 +128,12 @@ defmodule Durable.Orchestration do
       # Idempotent: already created
       {:ok, Map.get(context, fire_key)}
     else
-      # Create child and continue (no throw)
-      {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
-      Context.put_context(fire_key, child_id)
-      {:ok, child_id}
+      # Create child and continue (no throw). A failed after_start callback
+      # leaves no orphaned, runnable child behind.
+      with {:ok, child_id} <- create_child_execution(module, input, parent_id, opts) do
+        Context.put_context(fire_key, child_id)
+        {:ok, child_id}
+      end
     end
   end
 
@@ -137,15 +142,16 @@ defmodule Durable.Orchestration do
   # ============================================================================
 
   defp create_and_wait(module, input, parent_id, child_key, opts) do
-    {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
-    Context.put_context(child_key, child_id)
+    with {:ok, child_id} <- create_child_execution(module, input, parent_id, opts) do
+      Context.put_context(child_key, child_id)
 
-    throw(
-      {:call_workflow,
-       child_id: child_id,
-       timeout: Keyword.get(opts, :timeout),
-       timeout_value: Keyword.get(opts, :timeout_value, :child_timeout)}
-    )
+      throw(
+        {:call_workflow,
+         child_id: child_id,
+         timeout: Keyword.get(opts, :timeout),
+         timeout_value: Keyword.get(opts, :timeout_value, :child_timeout)}
+      )
+    end
   end
 
   defp handle_existing_child(child_id, opts) do
@@ -195,12 +201,38 @@ defmodule Durable.Orchestration do
       |> WorkflowExecution.changeset(attrs)
       |> Repo.insert(config)
 
-    # For inline execution (testing), execute the child immediately
-    if Keyword.get(opts, :inline, false) do
-      Executor.execute_workflow(execution.id, config)
-    end
+    with :ok <- after_start(opts, execution.id) do
+      # For inline execution (testing), execute the child immediately.
+      if Keyword.get(opts, :inline, false) do
+        Executor.execute_workflow(execution.id, config)
+      end
 
-    {:ok, execution.id}
+      {:ok, execution.id}
+    else
+      {:error, reason} ->
+        # A child without its required host-side registration (for example an
+        # org ownership tag) must never become runnable. Delete it before
+        # returning the error to the parent.
+        _ = Repo.delete(config, execution)
+        {:error, {:child_start_callback_failed, reason}}
+    end
+  end
+
+  defp after_start(opts, child_id) do
+    case Keyword.get(opts, :after_start) do
+      nil ->
+        :ok
+
+      callback when is_function(callback, 1) ->
+        case callback.(child_id) do
+          :ok -> :ok
+          {:error, _reason} = error -> error
+          other -> {:error, {:invalid_after_start_result, other}}
+        end
+
+      _ ->
+        {:error, :invalid_after_start_callback}
+    end
   end
 
   defp get_child_workflow_def(module, opts) do
