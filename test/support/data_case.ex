@@ -190,6 +190,42 @@ defmodule Durable.DataCase do
   def get_wait_group(repo, workflow_id),
     do: repo.one(from(w in WaitGroup, where: w.workflow_id == ^workflow_id))
 
+  def get_worker_pid(durable_name \\ Durable, queue_name \\ "default", job_id) do
+    worker_sup =
+      Module.concat([durable_name, Queue, WorkerSupervisor, camelize(queue_name)])
+
+    case Process.whereis(worker_sup) do
+      nil ->
+        nil
+
+      sup_pid ->
+        sup_pid
+        |> DynamicSupervisor.which_children()
+        |> Enum.find_value(fn {_, pid, _, _} when is_pid(pid) ->
+          find_worker_for_job(pid, job_id)
+        end)
+    end
+  end
+
+  defp find_worker_for_job(pid, job_id) do
+    state = :sys.get_state(pid, 100)
+
+    if (is_map(state) and Map.get(state, :job)) && state.job.id == job_id do
+      pid
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp camelize(string) do
+    string
+    |> String.split("_")
+    |> Enum.map_join(&String.capitalize/1)
+    |> String.to_atom()
+  end
+
   def get_child_executions(repo, parent_id),
     do: repo.all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent_id))
 
