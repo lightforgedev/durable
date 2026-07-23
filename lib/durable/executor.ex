@@ -1914,17 +1914,45 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {:ok, _pending_event} =
-      %PendingEvent{}
-      |> PendingEvent.changeset(attrs)
-      |> Repo.insert(config)
+    # A step may dispatch an external actor which can signal its completion
+    # immediately. The event row and the workflow's :waiting transition must
+    # therefore commit together: otherwise `send_event/4` can receive the
+    # newly-created event while the workflow is still :running, and this stale
+    # executor can subsequently overwrite the resumed :pending state.
+    #
+    # `on_conflict: :nothing` also makes a legacy/replayed executor harmless.
+    # The partial unique index on pending events is the durable fence; the
+    # conditional workflow update prevents a stale executor from regressing a
+    # workflow which has already been resumed or completed.
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(
+        :pending_event,
+        PendingEvent.changeset(%PendingEvent{}, attrs),
+        on_conflict: :nothing
+      )
+      |> Ecto.Multi.run(:execution, fn repo, _changes ->
+        query =
+          from(candidate in WorkflowExecution,
+            where: candidate.id == ^execution.id and candidate.status == :running
+          )
 
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> Repo.update(config)
+        case repo.update_all(query, set: [status: :waiting, scheduled_at: nil]) do
+          {1, _} -> {:ok, repo.get(WorkflowExecution, execution.id)}
+          {0, _} -> {:ok, repo.get(WorkflowExecution, execution.id)}
+        end
+      end)
 
-    {:waiting, execution}
+    case Repo.transaction(config, multi) do
+      {:ok, %{execution: %WorkflowExecution{status: :waiting} = waiting}} ->
+        {:waiting, waiting}
+
+      {:ok, %{execution: execution}} ->
+        {:ok, execution}
+
+      {:error, _stage, reason, _changes} ->
+        {:error, reason}
+    end
   end
 
   defp handle_wait_for_input(config, execution, opts) do
