@@ -54,12 +54,12 @@ defmodule Durable.Executor do
          {:ok, execution} <- create_execution(config, module, workflow_def, input, opts) do
       DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
 
-      # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
         execute_workflow(execution.id, config)
+      else
+        QueueManager.wake(durable_name, execution.queue)
       end
 
-      # Otherwise, the queue poller will pick up the job
       {:ok, execution.id}
     end
   end
