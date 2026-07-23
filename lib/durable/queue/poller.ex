@@ -222,7 +222,11 @@ defmodule Durable.Queue.Poller do
       "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
     )
 
-    state = handle_job_completion(state, job_id, result)
+    state =
+      state
+      |> handle_job_completion(job_id, result)
+      |> schedule_poll(0)
+
     {:noreply, state}
   end
 

@@ -596,17 +596,25 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {:ok, _} =
-      %PendingEvent{}
-      |> PendingEvent.changeset(attrs)
-      |> Repo.insert(config)
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(:event, PendingEvent.changeset(%PendingEvent{}, attrs))
+      |> Ecto.Multi.update(
+        :parent,
+        Ecto.Changeset.change(execution, status: :waiting, scheduled_at: nil)
+      )
 
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> Repo.update(config)
+    case Repo.transaction(config, multi) do
+      {:ok, %{parent: parent}} ->
+        # The child may have reached a terminal state before the parent wait
+        # became visible. Reconcile after commit; a later completion follows
+        # the normal notification path and observes the durable wait.
+        reconcile_terminal_child(config, child_id)
+        {:waiting, Repo.get(config, WorkflowExecution, parent.id)}
 
-    {:waiting, execution}
+      {:error, stage, reason, _changes} ->
+        raise "failed to persist child wait at #{stage}: #{inspect(reason)}"
+    end
   end
 
   defp execute_branch(
@@ -1345,7 +1353,8 @@ defmodule Durable.Executor do
     do: key |> Atom.to_string() |> orchestration_key?()
 
   defp orchestration_key?(key) when is_binary(key) do
-    String.starts_with?(key, "__child:") or
+    key in ["__children", "__child_results"] or
+      String.starts_with?(key, "__child:") or
       String.starts_with?(key, "__fire_forget:") or
       String.starts_with?(key, "__child_done:")
   end
@@ -1547,6 +1556,10 @@ defmodule Durable.Executor do
       end)
 
     case Repo.transaction(config, multi) do
+      {:ok, %{parent: %WorkflowExecution{queue: queue, status: :pending}}} ->
+        QueueManager.wake(config.name, queue)
+        :ok
+
       {:ok, _} ->
         :ok
 
@@ -1668,6 +1681,10 @@ defmodule Durable.Executor do
       end)
 
     case Repo.transaction(config, multi) do
+      {:ok, %{parent: %WorkflowExecution{queue: queue, status: :pending}}} ->
+        QueueManager.wake(config.name, queue)
+        :ok
+
       {:ok, _} ->
         :ok
 
@@ -1683,22 +1700,20 @@ defmodule Durable.Executor do
 
   # Build context update for parent with child result stored under the right key
   defp build_parent_result_context(parent, child_id, payload) do
-    parent_context = parent.context || %{}
+    Durable.Orchestration.result_context(parent.context || %{}, child_id, payload)
+  end
 
-    # Find which ref this child belongs to by looking for __child:ref = child_id
-    ref =
-      Enum.find_value(parent_context, fn
-        {"__child:" <> ref_str, ^child_id} -> ref_str
-        _ -> nil
-      end)
+  defp reconcile_terminal_child(config, child_id) do
+    case Repo.get(config, WorkflowExecution, child_id) do
+      %WorkflowExecution{status: :completed} = child ->
+        maybe_notify_parent(config, child, :completed, child.context)
 
-    if ref do
-      %{
-        "__child_done:#{ref}" => payload,
-        Durable.Orchestration.child_event_name(child_id) => payload
-      }
-    else
-      %{Durable.Orchestration.child_event_name(child_id) => payload}
+      %WorkflowExecution{status: status} = child
+      when status in [:failed, :cancelled, :compensation_failed] ->
+        maybe_notify_parent(config, child, status, child.error)
+
+      _ ->
+        :ok
     end
   end
 
