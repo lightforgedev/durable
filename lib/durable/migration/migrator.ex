@@ -20,7 +20,8 @@ defmodule Durable.Migration.Migrator do
     Durable.Migration.Migrations.V20260623000000AddLockFencing,
     Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink,
     Durable.Migration.Migrations.V20260718000000AddWorkflowRetryMetadata,
-    Durable.Migration.Migrations.V20260719000000AddPendingEventTimeoutMode
+    Durable.Migration.Migrations.V20260719000000AddPendingEventTimeoutMode,
+    Durable.Migration.Migrations.V20260723000000HardenPendingEventUniqueness
   ]
 
   @doc """

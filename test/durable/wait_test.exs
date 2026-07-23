@@ -300,6 +300,29 @@ defmodule Durable.WaitTest do
       assert pending.wait_type == :single
     end
 
+    test "does not re-execute a workflow that is already waiting" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
+
+      # A second worker can load the same run just before the first worker
+      # persists its wait. Re-executing from :waiting used to re-enter the
+      # step and create a duplicate pending event for the same logical event.
+      assert {:error, :not_pending} = Executor.execute_workflow(execution.id, config)
+
+      assert 1 ==
+               repo.aggregate(
+                 from(p in PendingEvent,
+                   where:
+                     p.workflow_id == ^execution.id and
+                       p.event_name == "payment_confirmed" and
+                       p.status == :pending
+                 ),
+                 :count
+               )
+    end
+
     test "with timeout option sets timeout_at" do
       config = Config.get(Durable)
       repo = config.repo
@@ -354,13 +377,16 @@ defmodule Durable.WaitTest do
       config = Config.get(Durable)
       repo = config.repo
 
-      {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
-      assert execution.status == :waiting
-
-      assert :ok = Wait.send_event(execution.id, "payment_confirmed", %{"amount" => 99.99})
+      {:ok, workflow_id} = Durable.start(EventWaitTestWorkflow, %{})
 
       assert_eventually(fn ->
-        case repo.get!(WorkflowExecution, execution.id) do
+        repo.get!(WorkflowExecution, workflow_id).status == :waiting
+      end)
+
+      assert :ok = Wait.send_event(workflow_id, "payment_confirmed", %{"amount" => 99.99})
+
+      assert_eventually(fn ->
+        case repo.get!(WorkflowExecution, workflow_id) do
           %{status: :completed, context: %{"result" => %{"amount" => 99.99}}} -> true
           _ -> false
         end
