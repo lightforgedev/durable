@@ -21,7 +21,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ```elixir
 def deps do
-  [{:durable, "~> 0.0.0-alpha"}]
+  [{:durable, "~> 0.1.0-rc"}]
 end
 ```
 
@@ -36,6 +36,17 @@ defmodule MyApp.Repo.Migrations.AddDurable do
   def down, do: Durable.Migration.down()
 end
 ```
+
+When a Durable upgrade ships new internal migrations, generate a new wrapper
+migration and run your normal Ecto migration flow:
+
+```bash
+mix durable.gen.upgrade -r MyApp.Repo
+mix ecto.migrate
+```
+
+Use `mix durable.migrations -r MyApp.Repo --check` in CI or deploy gates to
+fail when the database is behind the Durable library version.
 
 ### 2. Add to Supervision Tree
 
@@ -514,6 +525,37 @@ mix durable.cleanup --older-than 7d --status completed   # only completed, older
 mix durable.cleanup --older-than 24h --dry-run           # preview what would be deleted
 ```
 
+## Dashboard
+
+`durable_dashboard` is a LiveView-first console for monitoring and managing
+running workflows. Mount it into your Phoenix router with one line:
+
+```elixir
+defmodule MyAppWeb.Router do
+  use MyAppWeb, :router
+
+  # ...your existing pipelines and scopes...
+
+  use DurableDashboard.Router, mount: "/dashboard", durable: MyApp.Durable
+end
+```
+
+The macro adds the dashboard's pipelines, asset routes, and live routes
+in-place — no `forward`, no extra endpoint. You get:
+
+- Overview with live status counts and recent executions
+- Workflow catalog + an Executions list with a faceted filter bar (workflow,
+  status, time range, execution id) driven by shareable URL params
+- Execution detail with Summary, ReactFlow graph, Timeline, Logs, I/O, and
+  History trace (plus a Family tab for parent/child runs)
+- Pending inputs queue
+- Schedules list with toggle / trigger actions
+- Settings view
+- ⌘K command palette — jump to any page, workflow, or recent run
+
+See [`durable_dashboard/README.md`](durable_dashboard/) for the full
+option list and design notes.
+
 ## Guides
 
 - [Branching](guides/branching.md) - Conditional flow control
@@ -521,10 +563,6 @@ mix durable.cleanup --older-than 24h --dry-run           # preview what would be
 - [Compensations](guides/compensations.md) - Saga pattern
 - [Waiting](guides/waiting.md) - Sleep, events, human input
 - [Orchestration](guides/orchestration.md) - Parent/child workflow composition
-
-## Coming Soon
-
-- Phoenix LiveView dashboard
 
 ## License
 
