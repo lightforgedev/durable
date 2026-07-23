@@ -8,9 +8,10 @@ defmodule Durable.Migration.Migrations.V20260723000000HardenPendingEventUniquene
   @impl true
   def up(prefix) do
     # Older host schemas did not enforce this invariant, so normalize existing
-    # rows before making it database-enforced. The oldest pending row remains
-    # the logical wait; later rows are duplicate attempts and must not receive
-    # a second completion event.
+    # single-event rows before making their existing invariant database-enforced.
+    # The oldest pending row remains the logical wait; later rows are duplicate
+    # attempts and must not receive a second completion event. Wait-group rows
+    # deliberately retain their prior, non-unique behavior.
     execute("""
     WITH ranked AS (
       SELECT id,
@@ -19,7 +20,7 @@ defmodule Durable.Migration.Migrations.V20260723000000HardenPendingEventUniquene
                ORDER BY inserted_at ASC, id ASC
              ) AS row_number
       FROM #{quote_identifier(prefix)}.pending_events
-      WHERE status = 'pending'
+      WHERE status = 'pending' AND wait_type = 'single'
     )
     UPDATE #{quote_identifier(prefix)}.pending_events AS pending_event
     SET status = 'cancelled',
@@ -36,7 +37,7 @@ defmodule Durable.Migration.Migrations.V20260723000000HardenPendingEventUniquene
 
     create(
       unique_index(:pending_events, [:workflow_id, :event_name],
-        where: "status = 'pending'",
+        where: "status = 'pending' AND wait_type = 'single'",
         name: :pending_events_workflow_event_pending_idx,
         prefix: prefix
       )
