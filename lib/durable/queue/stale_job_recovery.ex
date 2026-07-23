@@ -81,21 +81,35 @@ defmodule Durable.Queue.StaleJobRecovery do
   defp do_recovery(%Config{} = config) do
     adapter = Adapter.default_adapter()
 
-    case adapter.recover_stale_locks(config, config.stale_lock_timeout) do
-      {:ok, 0} ->
-        {:ok, 0}
+    with {:ok, stale_count} <-
+           adapter.recover_stale_locks(config, config.stale_lock_timeout),
+         {:ok, zombie_count} <- recover_zombie_workflows(adapter, config) do
+      if stale_count > 0 do
+        Logger.info("Recovered #{stale_count} stale job(s) for #{inspect(config.name)}")
+        emit_telemetry(:stale_recovered, stale_count, config.name)
+      end
 
-      {:ok, count} ->
-        Logger.info("Recovered #{count} stale job(s) for #{inspect(config.name)}")
-        emit_telemetry(count, config.name)
-        {:ok, count}
-
-      {:error, reason} = error ->
-        Logger.error(
-          "Failed to recover stale locks for #{inspect(config.name)}: #{inspect(reason)}"
+      if zombie_count > 0 do
+        Logger.warning(
+          "Marked #{zombie_count} zombie workflow(s) as failed for #{inspect(config.name)}"
         )
 
+        emit_telemetry(:zombie_recovered, zombie_count, config.name)
+      end
+
+      {:ok, stale_count + zombie_count}
+    else
+      {:error, reason} = error ->
+        Logger.error("Recovery failed for #{inspect(config.name)}: #{inspect(reason)}")
         error
+    end
+  end
+
+  defp recover_zombie_workflows(adapter, config) do
+    if function_exported?(adapter, :recover_zombie_workflows, 2) do
+      adapter.recover_zombie_workflows(config, config.stale_lock_timeout)
+    else
+      {:ok, 0}
     end
   end
 
@@ -107,9 +121,9 @@ defmodule Durable.Queue.StaleJobRecovery do
     Module.concat([durable_name, Queue, StaleJobRecovery])
   end
 
-  defp emit_telemetry(count, durable_name) do
+  defp emit_telemetry(event, count, durable_name) do
     :telemetry.execute(
-      [:durable, :queue, :stale_recovered],
+      [:durable, :queue, event],
       %{count: count},
       %{durable: durable_name}
     )
