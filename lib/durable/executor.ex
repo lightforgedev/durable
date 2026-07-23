@@ -106,10 +106,12 @@ defmodule Durable.Executor do
   """
   @spec execute_workflow(String.t(), Config.t()) ::
           {:ok, map()} | {:waiting, map()} | {:error, term()}
-  def execute_workflow(workflow_id, %Config{} = config) do
+  @spec execute_workflow(String.t(), Config.t(), Ecto.UUID.t() | nil) ::
+          {:ok, map()} | {:waiting, map()} | {:error, term()}
+  def execute_workflow(workflow_id, %Config{} = config, lock_token \\ nil) do
     with {:ok, execution} <- load_execution(config, workflow_id),
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
-         {:ok, execution} <- mark_running(config, execution) do
+         {:ok, execution} <- mark_running(config, execution, lock_token) do
       # Restore the persisted context as well as the original input. A resumed
       # workflow must retain completed-step results and any context written
       # before it suspended.
@@ -380,17 +382,44 @@ defmodule Durable.Executor do
     end
   end
 
-  defp mark_running(config, execution) do
-    case execution
-         |> WorkflowExecution.status_changeset(:running, %{started_at: DateTime.utc_now()})
-         |> Repo.update(config) do
-      {:ok, running} = ok ->
-        DurablePubSub.broadcast_workflow(config, :workflow_resumed, workflow_event(running))
-        ok
+  defp mark_running(config, execution, lock_token) do
+    now = DateTime.utc_now()
+    workflow_id = execution.id
 
-      other ->
-        other
+    # `execute_workflow/2` may be invoked both by the queue and by an
+    # immediate caller. Loading a pending row and then blindly updating the
+    # struct lets two runners both enter the same step. A wait step then
+    # persists two rows for one logical event. Claim the pending state in SQL
+    # so exactly one runner may make the transition.
+    query = running_claim_query(workflow_id, lock_token)
+
+    case Repo.update_all(config, query, set: [status: :running, started_at: now, updated_at: now]) do
+      {1, _} ->
+        running = Repo.get(config, WorkflowExecution, workflow_id)
+        DurablePubSub.broadcast_workflow(config, :workflow_resumed, workflow_event(running))
+        {:ok, running}
+
+      {0, _} ->
+        {:error, :not_pending}
     end
+  end
+
+  # Immediate callers claim a pending run themselves. Queue workers have
+  # already claimed the run atomically and must present that exact fencing
+  # token; accepting a bare :running row would re-admit a replayed caller.
+  defp running_claim_query(workflow_id, nil) do
+    from(candidate in WorkflowExecution,
+      where: candidate.id == ^workflow_id and candidate.status == :pending
+    )
+  end
+
+  defp running_claim_query(workflow_id, lock_token) do
+    from(candidate in WorkflowExecution,
+      where:
+        candidate.id == ^workflow_id and
+          candidate.status == :running and
+          candidate.lock_token == ^lock_token
+    )
   end
 
   defp execute_steps(steps, execution, config, initial_data) do

@@ -139,6 +139,28 @@ defmodule Durable.DataCase do
   def pid_to_bin(pid \\ self()), do: pid |> :erlang.term_to_binary() |> Base.encode64()
   def bin_to_pid(bin), do: bin |> Base.decode64!() |> :erlang.binary_to_term()
 
+  def get_worker_pid(durable_name, queue_name, workflow_id) do
+    worker_supervisor =
+      Module.concat([
+        durable_name,
+        "Queue",
+        "WorkerSupervisor",
+        Macro.camelize(to_string(queue_name))
+      ])
+
+    DynamicSupervisor.which_children(worker_supervisor)
+    |> Enum.find_value(fn
+      {_, pid, :worker, _} ->
+        case :sys.get_state(pid) do
+          %{job: %{id: ^workflow_id}} -> pid
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
   def create_and_execute_workflow(module, input, opts \\ []) do
     config = Config.get(Durable)
     {:ok, workflow_def} = module.__default_workflow__()
