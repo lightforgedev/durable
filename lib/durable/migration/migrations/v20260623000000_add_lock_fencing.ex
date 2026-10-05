@@ -16,18 +16,14 @@ defmodule Durable.Migration.Migrations.V20260623000000AddLockFencing do
 
   @impl true
   def up(prefix) do
-    alter table(:workflow_executions, prefix: prefix) do
-      add_if_not_exists(:lock_token, :binary_id)
-    end
+    add_column_if_not_exists(:workflow_executions, :lock_token, :binary_id, [], prefix)
 
     :ok
   end
 
   @impl true
   def down(prefix) do
-    alter table(:workflow_executions, prefix: prefix) do
-      remove_if_exists(:lock_token, :binary_id)
-    end
+    remove_column_if_exists(:workflow_executions, :lock_token, :binary_id, prefix)
 
     :ok
   end

@@ -117,7 +117,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :waiting
       force_sleep_elapsed!(repo, execution.id)
 
-      adapter = Adapter.default_adapter()
+      adapter = Adapter.for_config(config)
       {:ok, woken} = adapter.wake_sleeping_workflows(config, 100)
       assert woken == 1
 
@@ -136,7 +136,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :waiting
       force_sleep_elapsed!(repo, execution.id)
 
-      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
 
       # Drive the resumed workflow synchronously, the way the queue
       # poller would after fetch_jobs claims the now-:pending row.
@@ -156,7 +156,7 @@ defmodule Durable.WaitTest do
       {:ok, execution} = create_and_execute_workflow(ShortScheduleAtWorkflow, %{})
       assert execution.status == :waiting
 
-      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
       Durable.Executor.execute_workflow(execution.id, config)
 
       execution = repo.get!(WorkflowExecution, execution.id)
@@ -172,7 +172,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :waiting
       force_sleep_elapsed!(repo, execution.id)
 
-      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
       Durable.Executor.execute_workflow(execution.id, config)
       execution = repo.get!(WorkflowExecution, execution.id)
       # Suspended again at the second sleep. The first sleep's marker was
@@ -183,7 +183,7 @@ defmodule Durable.WaitTest do
       assert execution.context["__sleep_satisfied__"] == nil
 
       force_sleep_elapsed!(repo, execution.id)
-      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
       Durable.Executor.execute_workflow(execution.id, config)
 
       execution = repo.get!(WorkflowExecution, execution.id)
@@ -198,7 +198,7 @@ defmodule Durable.WaitTest do
 
     test "the sweep is a no-op when no rows are eligible" do
       config = Config.get(Durable)
-      adapter = Adapter.default_adapter()
+      adapter = Adapter.for_config(config)
 
       assert {:ok, 0} = adapter.wake_sleeping_workflows(config, 100)
     end
@@ -211,7 +211,7 @@ defmodule Durable.WaitTest do
       # duplicate PendingEvent rows.
       config = Config.get(Durable)
       repo = config.repo
-      adapter = Adapter.default_adapter()
+      adapter = Adapter.for_config(config)
 
       {:ok, execution} = create_and_execute_workflow(SleepThenEventWorkflow, %{})
       assert execution.status == :waiting

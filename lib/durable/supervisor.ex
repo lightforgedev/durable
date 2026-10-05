@@ -51,6 +51,7 @@ defmodule Durable.Supervisor do
 
   alias Durable.Config
   alias Durable.LogCapture.Handler
+  alias Durable.Storage.Dialect
 
   @doc """
   Starts the Durable supervisor.
@@ -89,6 +90,8 @@ defmodule Durable.Supervisor do
 
   @impl true
   def init(%Config{} = config) do
+    :ok = Dialect.validate!(config.repo)
+
     # Attach log capture handler (idempotent)
     :ok = Handler.attach()
 

@@ -103,7 +103,7 @@ defmodule Durable.Queue.Manager do
 
     queue_name
     |> normalize_queue_name()
-    |> then(&Adapter.default_adapter().get_stats(config, &1))
+    |> then(&Adapter.for_config(config).get_stats(config, &1))
   end
 
   @doc """

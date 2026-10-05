@@ -91,7 +91,7 @@ defmodule Durable.Wait.SleepWaker do
   # Private
 
   defp do_wake(%__MODULE__{config: config, batch_size: batch_size}) do
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(config)
 
     if function_exported?(adapter, :wake_sleeping_workflows, 2) do
       case adapter.wake_sleeping_workflows(config, batch_size) do

@@ -146,7 +146,22 @@ defmodule Durable.Queue.Adapter do
   Returns the default adapter module.
   """
   @spec default_adapter() :: module()
-  def default_adapter do
-    Durable.Queue.Adapters.Postgres
-  end
+  def default_adapter, do: Durable.Queue.Adapters.Postgres
+
+  @doc """
+  Returns the default adapter for a storage dialect (`:postgres` or `:sqlite`).
+  """
+  @spec default_adapter(Durable.Storage.Dialect.t()) :: module()
+  def default_adapter(:postgres), do: Durable.Queue.Adapters.Postgres
+  def default_adapter(:sqlite), do: Durable.Queue.Adapters.SQLite
+
+  @doc """
+  Returns the adapter a Durable instance uses: `config.queue_adapter`, or
+  the PostgreSQL adapter for configs built without one.
+  """
+  @spec for_config(Config.t()) :: module()
+  def for_config(%Config{queue_adapter: adapter}) when is_atom(adapter) and adapter != nil,
+    do: adapter
+
+  def for_config(%Config{}), do: default_adapter()
 end

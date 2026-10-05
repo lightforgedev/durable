@@ -7,18 +7,20 @@ defmodule Durable.Migration.Migrations.V20260719000000AddPendingEventTimeoutMode
 
   @impl true
   def up(prefix) do
-    alter table(:pending_events, prefix: prefix) do
-      add_if_not_exists(:on_timeout, :string, null: false, default: "resume")
-    end
+    add_column_if_not_exists(
+      :pending_events,
+      :on_timeout,
+      :string,
+      [null: false, default: "resume"],
+      prefix
+    )
 
     :ok
   end
 
   @impl true
   def down(prefix) do
-    alter table(:pending_events, prefix: prefix) do
-      remove_if_exists(:on_timeout, :string)
-    end
+    remove_column_if_exists(:pending_events, :on_timeout, :string, prefix)
 
     :ok
   end

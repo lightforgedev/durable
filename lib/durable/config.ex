@@ -35,10 +35,14 @@ defmodule Durable.Config do
 
   """
 
+  alias Durable.Queue.Adapter
+  alias Durable.Storage.Dialect
+
   @type t :: %__MODULE__{
           repo: module(),
           name: atom(),
-          prefix: String.t(),
+          prefix: String.t() | nil,
+          queue_adapter: module(),
           queues: map(),
           queue_enabled: boolean(),
           stale_lock_timeout: pos_integer(),
@@ -56,6 +60,7 @@ defmodule Durable.Config do
     :repo,
     :name,
     :prefix,
+    :queue_adapter,
     :queues,
     :queue_enabled,
     :stale_lock_timeout,
@@ -83,7 +88,16 @@ defmodule Durable.Config do
     prefix: [
       type: :string,
       default: "durable",
-      doc: "PostgreSQL schema name for table isolation"
+      doc:
+        "PostgreSQL schema name for table isolation. Resolved to nil on SQLite, " <>
+          "which has no schemas."
+    ],
+    queue_adapter: [
+      type: :atom,
+      default: nil,
+      doc:
+        "Queue adapter module (`Durable.Queue.Adapter`). Defaults to the adapter " <>
+          "for the repo's database (PostgreSQL or SQLite)."
     ],
     queues: [
       type: :map,
@@ -159,7 +173,7 @@ defmodule Durable.Config do
 
     case NimbleOptions.validate(opts, @schema) do
       {:ok, validated} ->
-        validated = resolve_pubsub(validated)
+        validated = validated |> resolve_pubsub() |> resolve_storage()
         {:ok, struct(__MODULE__, validated)}
 
       {:error, %NimbleOptions.ValidationError{}} = error ->
@@ -191,6 +205,26 @@ defmodule Durable.Config do
       _ ->
         opts
     end
+  end
+
+  # Resolve the storage dialect from the repo's Ecto adapter. SQLite has no
+  # schemas, so the prefix becomes nil; the queue adapter follows the
+  # database unless the host chose one.
+  defp resolve_storage(opts) do
+    repo = Keyword.fetch!(opts, :repo)
+
+    dialect =
+      if Code.ensure_loaded?(repo) and function_exported?(repo, :__adapter__, 0),
+        do: Dialect.of(repo),
+        else: :postgres
+
+    opts
+    |> Keyword.update(:prefix, nil, &if(dialect == :sqlite, do: nil, else: &1))
+    |> Keyword.update(
+      :queue_adapter,
+      nil,
+      &(&1 || Adapter.default_adapter(dialect))
+    )
   end
 
   @doc """

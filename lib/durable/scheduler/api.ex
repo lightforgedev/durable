@@ -27,6 +27,7 @@ defmodule Durable.Scheduler.API do
   alias Crontab.Scheduler
   alias Durable.Config
   alias Durable.Repo
+  alias Durable.Storage.Dialect
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @type schedule_opts :: [
@@ -350,10 +351,8 @@ defmodule Durable.Scheduler.API do
     now = DateTime.utc_now()
 
     query =
-      from(s in ScheduledWorkflow,
-        where: s.enabled == true and s.next_run_at <= ^now,
-        lock: "FOR UPDATE SKIP LOCKED"
-      )
+      from(s in ScheduledWorkflow, where: s.enabled == true and s.next_run_at <= ^now)
+      |> Dialect.for_update_skip_locked(config)
 
     Repo.all(config, query)
   end
