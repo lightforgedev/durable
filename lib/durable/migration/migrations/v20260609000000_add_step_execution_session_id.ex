@@ -7,9 +7,7 @@ defmodule Durable.Migration.Migrations.V20260609000000AddStepExecutionSessionId 
 
   @impl true
   def up(prefix) do
-    alter table(:step_executions, prefix: prefix) do
-      add_if_not_exists(:session_id, :string)
-    end
+    add_column_if_not_exists(:step_executions, :session_id, :string, [], prefix)
 
     create_if_not_exists(index(:step_executions, [:workflow_id, :session_id], prefix: prefix))
 
@@ -20,9 +18,7 @@ defmodule Durable.Migration.Migrations.V20260609000000AddStepExecutionSessionId 
   def down(prefix) do
     drop_if_exists(index(:step_executions, [:workflow_id, :session_id], prefix: prefix))
 
-    alter table(:step_executions, prefix: prefix) do
-      remove_if_exists(:session_id, :string)
-    end
+    remove_column_if_exists(:step_executions, :session_id, :string, prefix)
 
     :ok
   end

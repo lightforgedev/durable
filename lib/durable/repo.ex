@@ -22,6 +22,7 @@ defmodule Durable.Repo do
   """
 
   alias Durable.Config
+  alias Durable.Storage.Dialect
   alias Ecto.Adapters.SQL
 
   @doc """
@@ -128,8 +129,11 @@ defmodule Durable.Repo do
 
   @doc """
   Runs an `Ecto.Multi` or function transaction using the configured repo.
+
+  On SQLite the transaction starts `IMMEDIATE` (see `Durable.Storage.Dialect`).
   """
   def transaction(%Config{} = config, fun_or_multi, opts \\ []) do
+    opts = Keyword.merge(Dialect.transaction_opts(config), opts)
     config.repo.transaction(fun_or_multi, merge_opts(config, opts))
   end
 

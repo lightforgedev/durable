@@ -376,7 +376,7 @@ defmodule Durable.Query do
       # slice of the full UUID. Cast the uuid to text so LIKE works. Callers
       # must strip LIKE wildcards from user input (the dashboard does).
       {:id_prefix, prefix}, q when is_binary(prefix) and prefix != "" ->
-        from(w in q, where: fragment("?::text LIKE ?", w.id, ^(prefix <> "%")))
+        from(w in q, where: fragment("CAST(? AS TEXT) LIKE ?", w.id, ^(prefix <> "%")))
 
       {:queue, queue}, q ->
         queue_str = to_string(queue)

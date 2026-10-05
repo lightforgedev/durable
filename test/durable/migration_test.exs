@@ -21,6 +21,8 @@ defmodule Durable.MigrationTest do
     assert Migration.pending_versions(Durable.TestRepo) == []
   end
 
+  # Schemas (prefixes) are PostgreSQL-only; SQLite has one namespace per file.
+  @tag :postgres_only
   test "explicit repo helpers report missing prefixes as unmigrated" do
     prefix = "durable_missing_#{System.unique_integer([:positive])}"
 

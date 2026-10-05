@@ -17,7 +17,8 @@ defmodule Durable.Integration.ConcurrencyTest do
   @moduletag :integration
 
   alias Durable.Config
-  alias Durable.Queue.Adapters.Postgres
+  alias Durable.Queue.Adapter
+  alias Durable.Storage.Dialect
   alias Durable.Storage.Schemas.{PendingEvent, WaitGroup, WorkflowExecution}
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -32,15 +33,22 @@ defmodule Durable.Integration.ConcurrencyTest do
 
   defp truncate! do
     Sandbox.unboxed_run(@repo, fn ->
-      @repo.query!(
-        "TRUNCATE durable.workflow_executions, durable.scheduled_workflows RESTART IDENTITY CASCADE"
-      )
+      if Dialect.sqlite?(@repo) do
+        # Child tables cascade from workflow_executions (ON DELETE CASCADE).
+        @repo.query!("PRAGMA foreign_keys = ON")
+        @repo.query!("DELETE FROM workflow_executions")
+        @repo.query!("DELETE FROM scheduled_workflows")
+      else
+        @repo.query!(
+          "TRUNCATE durable.workflow_executions, durable.scheduled_workflows RESTART IDENTITY CASCADE"
+        )
+      end
     end)
   end
 
   defp committed(fun), do: Sandbox.unboxed_run(@repo, fun)
 
-  describe "fetch_jobs/4 — FOR UPDATE SKIP LOCKED across real backends" do
+  describe "fetch_jobs/4 — exclusive claims across real connections (SKIP LOCKED / IMMEDIATE)" do
     test "two workers claiming concurrently never double-claim a job", %{config: config} do
       committed(fn ->
         for i <- 1..40 do
@@ -58,7 +66,7 @@ defmodule Durable.Integration.ConcurrencyTest do
 
       claim = fn node ->
         committed(fn ->
-          config |> Postgres.fetch_jobs("default", 30, node) |> Enum.map(& &1.id)
+          Adapter.for_config(config).fetch_jobs(config, "default", 30, node) |> Enum.map(& &1.id)
         end)
       end
 

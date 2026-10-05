@@ -14,9 +14,7 @@ defmodule Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink do
 
   @impl true
   def up(prefix) do
-    alter table(:step_executions, prefix: prefix) do
-      add_if_not_exists(:child_workflow_id, :binary_id)
-    end
+    add_column_if_not_exists(:step_executions, :child_workflow_id, :binary_id, [], prefix)
 
     create_if_not_exists(index(:step_executions, [:child_workflow_id], prefix: prefix))
 
@@ -27,9 +25,7 @@ defmodule Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink do
   def down(prefix) do
     drop_if_exists(index(:step_executions, [:child_workflow_id], prefix: prefix))
 
-    alter table(:step_executions, prefix: prefix) do
-      remove_if_exists(:child_workflow_id, :binary_id)
-    end
+    remove_column_if_exists(:step_executions, :child_workflow_id, :binary_id, prefix)
 
     :ok
   end

@@ -59,6 +59,9 @@ defmodule Durable.MixProject do
       {:crontab, "~> 1.1"},
       {:igniter, "~> 0.6", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
+      # SQLite storage (single-node hosts, e.g. a desktop app). 0.23 is the
+      # last line on ecto ~> 3.13.0 and decimal 2.x, which the Platform pins.
+      {:ecto_sqlite3, "~> 0.23.0", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},

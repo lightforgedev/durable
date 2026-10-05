@@ -79,7 +79,7 @@ defmodule Durable.Queue.StaleJobRecovery do
   # Private functions
 
   defp do_recovery(%Config{} = config) do
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(config)
 
     with {:ok, stale_count} <-
            adapter.recover_stale_locks(config, config.stale_lock_timeout),

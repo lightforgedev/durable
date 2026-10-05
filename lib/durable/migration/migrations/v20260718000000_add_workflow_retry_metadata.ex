@@ -7,20 +7,29 @@ defmodule Durable.Migration.Migrations.V20260718000000AddWorkflowRetryMetadata d
 
   @impl true
   def up(prefix) do
-    alter table(:workflow_executions, prefix: prefix) do
-      add_if_not_exists(:retry_count, :integer, null: false, default: 0)
-      add_if_not_exists(:last_retried_at, :utc_datetime_usec)
-    end
+    add_column_if_not_exists(
+      :workflow_executions,
+      :retry_count,
+      :integer,
+      [null: false, default: 0],
+      prefix
+    )
+
+    add_column_if_not_exists(
+      :workflow_executions,
+      :last_retried_at,
+      :utc_datetime_usec,
+      [],
+      prefix
+    )
 
     :ok
   end
 
   @impl true
   def down(prefix) do
-    alter table(:workflow_executions, prefix: prefix) do
-      remove_if_exists(:last_retried_at, :utc_datetime_usec)
-      remove_if_exists(:retry_count, :integer)
-    end
+    remove_column_if_exists(:workflow_executions, :last_retried_at, :utc_datetime_usec, prefix)
+    remove_column_if_exists(:workflow_executions, :retry_count, :integer, prefix)
 
     :ok
   end

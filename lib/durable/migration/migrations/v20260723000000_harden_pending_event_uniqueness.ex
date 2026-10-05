@@ -5,8 +5,15 @@ defmodule Durable.Migration.Migrations.V20260723000000HardenPendingEventUniquene
   @impl true
   def version, do: 20_260_723_000_000
 
+  # SQLite support starts after this migration, so a SQLite database already
+  # has the unique index (from v20260104) and no legacy duplicates to fix.
   @impl true
-  def up(prefix) do
+  def up(prefix), do: postgres_only(fn -> harden(prefix) end)
+
+  @impl true
+  def down(prefix), do: postgres_only(fn -> restore(prefix) end)
+
+  defp harden(prefix) do
     # Older host schemas did not enforce this invariant, so normalize existing
     # single-event rows before making their existing invariant database-enforced.
     # The oldest pending row remains the logical wait; later rows are duplicate
@@ -44,8 +51,7 @@ defmodule Durable.Migration.Migrations.V20260723000000HardenPendingEventUniquene
     )
   end
 
-  @impl true
-  def down(prefix) do
+  defp restore(prefix) do
     execute(
       "DROP INDEX IF EXISTS #{quote_identifier(prefix)}.pending_events_workflow_event_pending_idx"
     )

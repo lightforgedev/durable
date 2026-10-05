@@ -17,6 +17,7 @@ defmodule Durable.Executor do
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Queue.Manager, as: QueueManager
   alias Durable.Repo
+  alias Durable.Storage.Dialect
   alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.PendingInput
   alias Durable.Storage.Schemas.StepExecution
@@ -231,12 +232,10 @@ defmodule Durable.Executor do
     config = Config.get(durable_name)
 
     query =
-      from(execution in WorkflowExecution,
-        where: execution.id == ^workflow_id,
-        lock: "FOR UPDATE"
-      )
+      from(execution in WorkflowExecution, where: execution.id == ^workflow_id)
+      |> Dialect.for_update(config)
 
-    case config.repo.transaction(fn ->
+    case Repo.transaction(config, fn ->
            case Repo.one(config, query) do
              nil ->
                {:error, :not_found}
@@ -272,12 +271,10 @@ defmodule Durable.Executor do
 
   defp mark_failed_execution_pending(config, workflow_id) do
     query =
-      from(execution in WorkflowExecution,
-        where: execution.id == ^workflow_id,
-        lock: "FOR UPDATE"
-      )
+      from(execution in WorkflowExecution, where: execution.id == ^workflow_id)
+      |> Dialect.for_update(config)
 
-    case config.repo.transaction(fn ->
+    case Repo.transaction(config, fn ->
            config
            |> Repo.one(query)
            |> retry_locked_execution(config)

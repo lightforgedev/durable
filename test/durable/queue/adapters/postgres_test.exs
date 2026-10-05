@@ -4,7 +4,11 @@ defmodule Durable.Queue.Adapters.PostgresTest do
   import Ecto.Query
 
   alias Durable.Config
-  alias Durable.Queue.Adapters.Postgres
+  # Runs against the adapter for the test database (DURABLE_TEST_DB), so the
+  # same contract covers Durable.Queue.Adapters.Postgres and .SQLite.
+  @adapter Durable.Queue.Adapter.default_adapter(
+             Application.compile_env(:durable, :test_db, :postgres)
+           )
   alias Durable.Storage.Schemas.WorkflowExecution
 
   defp config, do: Config.get(Durable)
@@ -18,7 +22,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       end
 
       # Fetch 3 jobs
-      jobs = Postgres.fetch_jobs(config(), "default", 3, "node_a")
+      jobs = @adapter.fetch_jobs(config(), "default", 3, "node_a")
 
       assert length(jobs) == 3
 
@@ -37,7 +41,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       high = insert_execution(priority: 10, workflow_name: "high")
       medium = insert_execution(priority: 5, workflow_name: "medium")
 
-      jobs = Postgres.fetch_jobs(config(), "default", 3, "node_a")
+      jobs = @adapter.fetch_jobs(config(), "default", 3, "node_a")
 
       assert length(jobs) == 3
       assert Enum.at(jobs, 0).id == high.id
@@ -53,7 +57,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       job_later = insert_execution(scheduled_at: later, workflow_name: "later")
       job_earlier = insert_execution(scheduled_at: earlier, workflow_name: "earlier")
 
-      jobs = Postgres.fetch_jobs(config(), "default", 2, "node_a")
+      jobs = @adapter.fetch_jobs(config(), "default", 2, "node_a")
 
       assert length(jobs) == 2
       # Earlier scheduled_at should come first
@@ -74,7 +78,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       # Create an unlocked job
       unlocked = insert_execution(workflow_name: "unlocked")
 
-      jobs = Postgres.fetch_jobs(config(), "default", 10, "node_a")
+      jobs = @adapter.fetch_jobs(config(), "default", 10, "node_a")
 
       assert length(jobs) == 1
       assert Enum.at(jobs, 0).id == unlocked.id
@@ -85,7 +89,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       _future_job = insert_execution(scheduled_at: future, workflow_name: "future")
       now_job = insert_execution(workflow_name: "now")
 
-      jobs = Postgres.fetch_jobs(config(), "default", 10, "node_a")
+      jobs = @adapter.fetch_jobs(config(), "default", 10, "node_a")
 
       assert length(jobs) == 1
       assert Enum.at(jobs, 0).id == now_job.id
@@ -100,8 +104,8 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       end
 
       # Simulate concurrent claims
-      task1 = Task.async(fn -> Postgres.fetch_jobs(cfg, "default", 5, "node_a") end)
-      task2 = Task.async(fn -> Postgres.fetch_jobs(cfg, "default", 5, "node_b") end)
+      task1 = Task.async(fn -> @adapter.fetch_jobs(cfg, "default", 5, "node_a") end)
+      task2 = Task.async(fn -> @adapter.fetch_jobs(cfg, "default", 5, "node_b") end)
 
       jobs1 = Task.await(task1)
       jobs2 = Task.await(task2)
@@ -128,7 +132,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      {:ok, count} = Postgres.recover_stale_locks(config(), 300)
+      {:ok, count} = @adapter.recover_stale_locks(config(), 300)
 
       assert count == 1
 
@@ -150,7 +154,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      {:ok, count} = Postgres.recover_stale_locks(config(), 300)
+      {:ok, count} = @adapter.recover_stale_locks(config(), 300)
 
       assert count == 0
 
@@ -175,7 +179,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 1
 
       reloaded = repo().get!(WorkflowExecution, zombie.id)
@@ -208,7 +212,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         })
         |> repo().insert()
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, waiter.id)
@@ -236,7 +240,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         })
         |> repo().insert()
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, waiter.id)
@@ -249,7 +253,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       recent_waiter =
         insert_execution(workflow_name: "recent_waiter", status: :waiting)
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, recent_waiter.id)
@@ -268,7 +272,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       assert repo().get!(WorkflowExecution, running.id).status == :running
@@ -286,7 +290,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 1
       assert repo().get!(WorkflowExecution, zombie.id).status == :failed
     end
@@ -315,7 +319,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         })
         |> repo().insert()
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 0
       assert repo().get!(WorkflowExecution, live.id).status == :compensating
     end
@@ -335,7 +339,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 3
 
       for id <- zombies do
@@ -354,7 +358,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      :ok = Postgres.ack(config(), job.id)
+      :ok = @adapter.ack(config(), job.id)
 
       execution = repo().get!(WorkflowExecution, job.id)
       assert execution.locked_by == nil
@@ -373,8 +377,8 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      assert :ok = Postgres.ack(config(), job.id)
-      assert :ok = Postgres.ack(config(), job.id)
+      assert :ok = @adapter.ack(config(), job.id)
+      assert :ok = @adapter.ack(config(), job.id)
     end
   end
 
@@ -398,7 +402,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         )
 
       # Non-existent jobs return :not_found without firing telemetry.
-      assert {:error, :not_found} = Postgres.ack(config(), Ecto.UUID.generate())
+      assert {:error, :not_found} = @adapter.ack(config(), Ecto.UUID.generate())
       refute_received {:ack_failed, ^ref, _, _}, 100
 
       :telemetry.detach("ack-failed-test-#{inspect(ref)}")
@@ -407,7 +411,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
   describe "ack/2 not_found" do
     test "returns error for non-existent job" do
-      result = Postgres.ack(config(), Ecto.UUID.generate())
+      result = @adapter.ack(config(), Ecto.UUID.generate())
       assert result == {:error, :not_found}
     end
   end
@@ -422,7 +426,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      :ok = Postgres.nack(config(), job.id, %{message: "Something went wrong"})
+      :ok = @adapter.nack(config(), job.id, %{message: "Something went wrong"})
 
       execution = repo().get!(WorkflowExecution, job.id)
       assert execution.status == :failed
@@ -444,7 +448,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         )
 
       future = DateTime.add(DateTime.utc_now(), 3600, :second)
-      :ok = Postgres.reschedule(config(), job.id, future)
+      :ok = @adapter.reschedule(config(), job.id, future)
 
       execution = repo().get!(WorkflowExecution, job.id)
       assert execution.status == :pending
@@ -466,20 +470,20 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      :ok = Postgres.heartbeat(config(), job.id)
+      :ok = @adapter.heartbeat(config(), job.id)
 
       updated = repo().get!(WorkflowExecution, job.id)
       assert DateTime.compare(updated.locked_at, old_time) == :gt
     end
 
     test "returns error for non-existent job" do
-      result = Postgres.heartbeat(config(), Ecto.UUID.generate())
+      result = @adapter.heartbeat(config(), Ecto.UUID.generate())
       assert result == {:error, :not_found}
     end
 
     test "returns error for non-running job" do
       job = insert_execution(workflow_name: "pending_job", status: :pending)
-      result = Postgres.heartbeat(config(), job.id)
+      result = @adapter.heartbeat(config(), job.id)
       assert result == {:error, :not_found}
     end
   end
@@ -489,7 +493,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       insert_execution(workflow_name: "fence_a")
       insert_execution(workflow_name: "fence_b")
 
-      jobs = Postgres.fetch_jobs(config(), "default", 2, "node_a")
+      jobs = @adapter.fetch_jobs(config(), "default", 2, "node_a")
       assert length(jobs) == 2
 
       tokens = Enum.map(jobs, & &1.lock_token)
@@ -503,61 +507,61 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
     test "heartbeat: matching token refreshes; stale token is :fenced; no token is legacy-ok" do
       insert_execution(workflow_name: "fence_hb")
-      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
 
-      assert :ok = Postgres.heartbeat(config(), job.id, job.lock_token)
-      assert :ok = Postgres.heartbeat(config(), job.id)
+      assert :ok = @adapter.heartbeat(config(), job.id, job.lock_token)
+      assert :ok = @adapter.heartbeat(config(), job.id)
 
       # The row is :running with token A; a worker holding a different token has
       # been superseded → :fenced so it can abort instead of double-executing.
-      assert {:error, :fenced} = Postgres.heartbeat(config(), job.id, Ecto.UUID.generate())
+      assert {:error, :fenced} = @adapter.heartbeat(config(), job.id, Ecto.UUID.generate())
     end
 
     test "a finished row reports :not_found, not :fenced (no spurious abort on completion)" do
       insert_execution(workflow_name: "fence_done")
-      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
 
       repo().get!(WorkflowExecution, job.id)
       |> Ecto.Changeset.change(status: :completed)
       |> repo().update!()
 
-      assert {:error, :not_found} = Postgres.heartbeat(config(), job.id, job.lock_token)
+      assert {:error, :not_found} = @adapter.heartbeat(config(), job.id, job.lock_token)
     end
 
     test "ack with a stale token is a no-op; the real owner's ack releases the row" do
       insert_execution(workflow_name: "fence_ack")
-      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
 
-      assert :ok = Postgres.ack(config(), job.id, Ecto.UUID.generate())
+      assert :ok = @adapter.ack(config(), job.id, Ecto.UUID.generate())
       still = repo().get!(WorkflowExecution, job.id)
       assert still.status == :running
       assert still.locked_by == "node_a"
 
-      assert :ok = Postgres.ack(config(), job.id, job.lock_token)
+      assert :ok = @adapter.ack(config(), job.id, job.lock_token)
       assert repo().get!(WorkflowExecution, job.id).locked_by == nil
     end
 
     test "nack with a stale token is a no-op" do
       insert_execution(workflow_name: "fence_nack")
-      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
 
-      assert :ok = Postgres.nack(config(), job.id, %{message: "boom"}, Ecto.UUID.generate())
+      assert :ok = @adapter.nack(config(), job.id, %{message: "boom"}, Ecto.UUID.generate())
       assert repo().get!(WorkflowExecution, job.id).status == :running
 
-      assert :ok = Postgres.nack(config(), job.id, %{message: "boom"}, job.lock_token)
+      assert :ok = @adapter.nack(config(), job.id, %{message: "boom"}, job.lock_token)
       assert repo().get!(WorkflowExecution, job.id).status == :failed
     end
 
     test "recover_stale_locks clears the lock_token so the fenced token can't re-match" do
       insert_execution(workflow_name: "fence_recover")
-      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
       assert is_binary(job.lock_token)
 
       repo().get!(WorkflowExecution, job.id)
       |> Ecto.Changeset.change(locked_at: DateTime.add(DateTime.utc_now(), -600, :second))
       |> repo().update!()
 
-      {:ok, n} = Postgres.recover_stale_locks(config(), 300)
+      {:ok, n} = @adapter.recover_stale_locks(config(), 300)
       assert n >= 1
 
       recovered = repo().get!(WorkflowExecution, job.id)
@@ -574,7 +578,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       insert_execution(workflow_name: "completed", status: :completed)
       insert_execution(workflow_name: "failed", status: :failed)
 
-      stats = Postgres.get_stats(config(), "default")
+      stats = @adapter.get_stats(config(), "default")
 
       assert stats.queue == "default"
       assert stats.pending == 2
@@ -601,7 +605,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           locked_at: DateTime.add(DateTime.utc_now(), -120, :second)
         )
 
-      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
+      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 100)
       assert count == 1
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
@@ -622,7 +626,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           current_step: "wait_step"
         )
 
-      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
+      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 100)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
@@ -637,7 +641,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           current_step: "await"
         )
 
-      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
+      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 100)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, waiter.id)
@@ -661,7 +665,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [context: %{"customer_email" => "alice@example.com"}]
         )
 
-      {:ok, _count} = Postgres.wake_sleeping_workflows(config(), 100)
+      {:ok, _count} = @adapter.wake_sleeping_workflows(config(), 100)
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
       assert reloaded.context["customer_email"] == "alice@example.com"
@@ -680,7 +684,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         )
       end
 
-      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 2)
+      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 2)
       assert count == 2
     end
   end
@@ -706,7 +710,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)

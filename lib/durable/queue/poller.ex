@@ -275,7 +275,7 @@ defmodule Durable.Queue.Poller do
     available_slots = state.concurrency - MapSet.size(state.active_jobs)
 
     if available_slots > 0 do
-      adapter = Adapter.default_adapter()
+      adapter = Adapter.for_config(state.config)
       jobs = adapter.fetch_jobs(state.config, state.queue_name, available_slots, state.node_id)
 
       emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
@@ -310,7 +310,7 @@ defmodule Durable.Queue.Poller do
   end
 
   defp handle_job_completion(state, job_id, result) do
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(state.config)
     token = Map.get(state.job_tokens, job_id)
 
     case result do

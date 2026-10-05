@@ -81,7 +81,7 @@ defmodule Durable.Queue.Worker do
   def handle_info(:heartbeat, state) do
     # Refresh the lock, passing the per-claim fencing token so a heartbeat can
     # tell whether we've been fenced out by stale-lock recovery + reclaim.
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(state.config)
 
     case adapter.heartbeat(state.config, state.job.id, state.job[:lock_token]) do
       {:error, :fenced} ->

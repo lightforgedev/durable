@@ -261,7 +261,7 @@ defmodule Mix.Tasks.Durable.Doctor do
   # StaleJobRecovery GenServer isn't in the supervision tree.
   defp run_fix(durable_name) do
     config = Durable.Config.get(durable_name)
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(config)
 
     Mix.shell().info("")
     Mix.shell().info("Running recovery...")
