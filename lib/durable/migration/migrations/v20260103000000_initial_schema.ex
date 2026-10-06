@@ -53,7 +53,7 @@ defmodule Durable.Migration.Migrations.V20260103000000InitialSchema do
       add(:locked_at, :utc_datetime_usec)
 
       # Compensation/Saga support
-      add(:compensation_results, :jsonb, default: "[]")
+      add(:compensation_results, json_type(), default: "[]")
       add(:compensated_at, :utc_datetime_usec)
 
       timestamps(type: :utc_datetime_usec)
@@ -90,11 +90,12 @@ defmodule Durable.Migration.Migrations.V20260103000000InitialSchema do
       add(:step_name, :string, null: false)
       add(:step_type, :string, null: false, default: "step")
       add(:attempt, :integer, null: false, default: 1)
+      add(:session_id, :string)
       add(:status, :string, null: false, default: "pending")
       add(:input, :map)
       add(:output, :map)
       add(:error, :map)
-      add(:logs, :jsonb, null: false, default: "[]")
+      add(:logs, json_type(), null: false, default: "[]")
       add(:started_at, :utc_datetime_usec)
       add(:completed_at, :utc_datetime_usec)
       add(:duration_ms, :integer)
@@ -112,11 +113,15 @@ defmodule Durable.Migration.Migrations.V20260103000000InitialSchema do
     create(index(:step_executions, [:workflow_id, :status], prefix: prefix))
     create(index(:step_executions, [:workflow_id, :attempt], prefix: prefix))
     create(index(:step_executions, [:workflow_id, :is_compensation], prefix: prefix))
+    create(index(:step_executions, [:workflow_id, :session_id], prefix: prefix))
 
-    execute(
-      "CREATE INDEX step_executions_logs_gin ON #{prefix}.step_executions USING GIN (logs)",
-      "DROP INDEX IF EXISTS #{prefix}.step_executions_logs_gin"
-    )
+    # GIN indexes are PostgreSQL-only; SQLite stores logs as JSON text.
+    postgres_only(fn ->
+      execute(
+        "CREATE INDEX step_executions_logs_gin ON #{prefix}.step_executions USING GIN (logs)",
+        "DROP INDEX IF EXISTS #{prefix}.step_executions_logs_gin"
+      )
+    end)
   end
 
   # pending_inputs table
@@ -139,9 +144,9 @@ defmodule Durable.Migration.Migrations.V20260103000000InitialSchema do
       add(:input_type, :string, null: false, default: "free_text")
       add(:prompt, :text)
       add(:schema, :map)
-      add(:fields, :jsonb)
+      add(:fields, json_type())
       add(:status, :string, null: false, default: "pending")
-      add(:response, :jsonb)
+      add(:response, json_type())
       add(:timeout_at, :utc_datetime_usec)
       add(:completed_at, :utc_datetime_usec)
 

@@ -39,6 +39,7 @@ defmodule Mix.Tasks.Durable.MigrationsTest do
     assert :ok = MigrationsTask.run(["-r", "Durable.TestRepo", "--check"])
   end
 
+  @tag :postgres_only
   test "--check raises when Durable migrations are pending" do
     prefix = unique_prefix("missing")
 
@@ -47,6 +48,7 @@ defmodule Mix.Tasks.Durable.MigrationsTest do
     end
   end
 
+  @tag :postgres_only
   test "reports partially migrated prefixes" do
     prefix = unique_prefix("partial")
     [applied | pending] = Migration.all_versions()

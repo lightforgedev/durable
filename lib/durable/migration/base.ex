@@ -59,6 +59,14 @@ defmodule Durable.Migration.Base do
       @behaviour Durable.Migration.Base
       use Ecto.Migration
 
+      import Durable.Migration.Dialect,
+        only: [
+          json_type: 0,
+          postgres_only: 1,
+          add_column_if_not_exists: 5,
+          remove_column_if_exists: 4
+        ]
+
       @impl true
       def up(_prefix), do: :ok
 

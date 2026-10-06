@@ -79,35 +79,38 @@ defmodule Durable.Queue.StaleJobRecovery do
   # Private functions
 
   defp do_recovery(%Config{} = config) do
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(config)
 
-    stale_result = adapter.recover_stale_locks(config, config.stale_lock_timeout)
-    log_recovery(:stale, stale_result, config.name)
+    with {:ok, stale_count} <-
+           adapter.recover_stale_locks(config, config.stale_lock_timeout),
+         {:ok, zombie_count} <- recover_zombie_workflows(adapter, config) do
+      if stale_count > 0 do
+        Logger.info("Recovered #{stale_count} stale job(s) for #{inspect(config.name)}")
+        emit_telemetry(:stale_recovered, stale_count, config.name)
+      end
 
-    # Zombie recovery is an optional adapter capability. Skip if not implemented.
-    if function_exported?(adapter, :recover_zombie_workflows, 2) do
-      zombie_result = adapter.recover_zombie_workflows(config, config.stale_lock_timeout)
-      log_recovery(:zombie, zombie_result, config.name)
+      if zombie_count > 0 do
+        Logger.warning(
+          "Marked #{zombie_count} zombie workflow(s) as failed for #{inspect(config.name)}"
+        )
+
+        emit_telemetry(:zombie_recovered, zombie_count, config.name)
+      end
+
+      {:ok, stale_count + zombie_count}
+    else
+      {:error, reason} = error ->
+        Logger.error("Recovery failed for #{inspect(config.name)}: #{inspect(reason)}")
+        error
     end
-
-    # Preserve the return shape expected by `recover_now/1` callers.
-    stale_result
   end
 
-  defp log_recovery(_kind, {:ok, 0}, _name), do: :ok
-
-  defp log_recovery(:stale, {:ok, count}, name) do
-    Logger.info("Recovered #{count} stale job(s) for #{inspect(name)}")
-    emit_telemetry(count, name)
-  end
-
-  defp log_recovery(:zombie, {:ok, count}, name) do
-    Logger.warning("Marked #{count} zombie workflow(s) as failed for #{inspect(name)}")
-    emit_zombie_telemetry(count, name)
-  end
-
-  defp log_recovery(kind, {:error, reason}, name) do
-    Logger.error("Failed #{kind} recovery for #{inspect(name)}: #{inspect(reason)}")
+  defp recover_zombie_workflows(adapter, config) do
+    if function_exported?(adapter, :recover_zombie_workflows, 2) do
+      adapter.recover_zombie_workflows(config, config.stale_lock_timeout)
+    else
+      {:ok, 0}
+    end
   end
 
   defp schedule_recovery(interval) do
@@ -118,17 +121,9 @@ defmodule Durable.Queue.StaleJobRecovery do
     Module.concat([durable_name, Queue, StaleJobRecovery])
   end
 
-  defp emit_telemetry(count, durable_name) do
+  defp emit_telemetry(event, count, durable_name) do
     :telemetry.execute(
-      [:durable, :queue, :stale_recovered],
-      %{count: count},
-      %{durable: durable_name}
-    )
-  end
-
-  defp emit_zombie_telemetry(count, durable_name) do
-    :telemetry.execute(
-      [:durable, :queue, :zombie_recovered],
+      [:durable, :queue, event],
       %{count: count},
       %{durable: durable_name}
     )

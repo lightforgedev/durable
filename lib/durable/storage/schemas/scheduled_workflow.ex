@@ -32,7 +32,8 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  @schema_prefix "durable"
+  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
+  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
   schema "scheduled_workflows" do
     field(:name, :string)
     field(:workflow_module, :string)
@@ -44,7 +45,6 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     field(:enabled, :boolean, default: true)
     field(:last_run_at, :utc_datetime_usec)
     field(:next_run_at, :utc_datetime_usec)
-    # Bug L-1 — scheduler resilience tracking
     field(:last_error, :string)
     field(:last_error_at, :utc_datetime_usec)
     field(:consecutive_failures, :integer, default: 0)
@@ -94,32 +94,22 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     |> cast(%{enabled: enabled}, [:enabled])
   end
 
-  @doc """
-  Creates a changeset that records a failure to load / start the scheduled
-  workflow. Increments `consecutive_failures` and stamps `last_error*`.
-  When the failure count reaches `auto_disable_after`, the schedule is
-  automatically disabled and `auto_disabled_at` is set so operators can
-  tell why the schedule stopped firing.
-  """
   def failure_changeset(scheduled_workflow, error_message, opts \\ []) do
     auto_disable_after = Keyword.get(opts, :auto_disable_after, 5)
     next_run_at = Keyword.get(opts, :next_run_at)
     now = DateTime.utc_now()
-    new_count = (scheduled_workflow.consecutive_failures || 0) + 1
-    auto_disable? = new_count >= auto_disable_after
+    consecutive_failures = (scheduled_workflow.consecutive_failures || 0) + 1
 
     attrs = %{
       last_error: String.slice(to_string(error_message), 0, 1024),
       last_error_at: now,
-      consecutive_failures: new_count,
+      consecutive_failures: consecutive_failures,
       next_run_at: next_run_at
     }
 
     attrs =
-      if auto_disable? do
-        attrs
-        |> Map.put(:enabled, false)
-        |> Map.put(:auto_disabled_at, now)
+      if consecutive_failures >= auto_disable_after do
+        attrs |> Map.put(:enabled, false) |> Map.put(:auto_disabled_at, now)
       else
         attrs
       end
@@ -134,10 +124,6 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     ])
   end
 
-  @doc """
-  Creates a changeset that records a successful trigger. Resets
-  `consecutive_failures` to 0 and clears the last_error fields.
-  """
   def success_changeset(scheduled_workflow, last_run_at, next_run_at) do
     cast(
       scheduled_workflow,
@@ -148,13 +134,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
         last_error_at: nil,
         consecutive_failures: 0
       },
-      [
-        :last_run_at,
-        :next_run_at,
-        :last_error,
-        :last_error_at,
-        :consecutive_failures
-      ]
+      [:last_run_at, :next_run_at, :last_error, :last_error_at, :consecutive_failures]
     )
   end
 

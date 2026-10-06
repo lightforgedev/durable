@@ -42,6 +42,7 @@ defmodule Durable.Wait do
 
   alias Durable.Config
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Queue.Manager, as: QueueManager
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
@@ -671,6 +672,14 @@ defmodule Durable.Wait do
         )
 
       case Repo.transaction(config, multi) do
+        {:ok, %{resume: %WorkflowExecution{queue: queue, status: :pending}}} ->
+          # `resume_parent_in_multi/3` must remain inside the event transaction
+          # so receipt + resume are atomic. Wake only after that transaction
+          # commits: otherwise a poller can observe the old waiting row, while
+          # omitting this wake leaves event-driven workflows pending forever.
+          QueueManager.wake(config.name, queue)
+          :ok
+
         {:ok, _} ->
           :ok
 
@@ -707,10 +716,21 @@ defmodule Durable.Wait do
          resume_payload
        ) do
     Ecto.Multi.new()
-    |> Ecto.Multi.update(
-      :event,
-      PendingEvent.receive_changeset(pending_event, storable_payload)
-    )
+    |> Ecto.Multi.run(:event, fn repo, _changes ->
+      query = from(p in PendingEvent, where: p.id == ^pending_event.id and p.status == :pending)
+
+      case repo.update_all(query,
+             set: [
+               status: :received,
+               payload: storable_payload,
+               completed_at: DateTime.utc_now(),
+               updated_at: DateTime.utc_now()
+             ]
+           ) do
+        {1, _} -> {:ok, pending_event}
+        {0, _} -> {:error, :not_found}
+      end
+    end)
     |> Ecto.Multi.run(:resume, fn repo, _ ->
       resume_after_event(repo, workflow_id, event_name, pending_event, resume_payload)
     end)

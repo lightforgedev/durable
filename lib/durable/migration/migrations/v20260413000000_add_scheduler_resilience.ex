@@ -12,24 +12,34 @@ defmodule Durable.Migration.Migrations.V20260413000000AddSchedulerResilience do
 
   @impl true
   def up(prefix) do
-    alter table(:scheduled_workflows, prefix: prefix) do
-      add_if_not_exists(:last_error, :text)
-      add_if_not_exists(:last_error_at, :utc_datetime_usec)
-      add_if_not_exists(:consecutive_failures, :integer, default: 0)
-      add_if_not_exists(:auto_disabled_at, :utc_datetime_usec)
-    end
+    add_column_if_not_exists(:scheduled_workflows, :last_error, :text, [], prefix)
+    add_column_if_not_exists(:scheduled_workflows, :last_error_at, :utc_datetime_usec, [], prefix)
+
+    add_column_if_not_exists(
+      :scheduled_workflows,
+      :consecutive_failures,
+      :integer,
+      [default: 0],
+      prefix
+    )
+
+    add_column_if_not_exists(
+      :scheduled_workflows,
+      :auto_disabled_at,
+      :utc_datetime_usec,
+      [],
+      prefix
+    )
 
     :ok
   end
 
   @impl true
   def down(prefix) do
-    alter table(:scheduled_workflows, prefix: prefix) do
-      remove_if_exists(:last_error, :text)
-      remove_if_exists(:last_error_at, :utc_datetime_usec)
-      remove_if_exists(:consecutive_failures, :integer)
-      remove_if_exists(:auto_disabled_at, :utc_datetime_usec)
-    end
+    remove_column_if_exists(:scheduled_workflows, :last_error, :text, prefix)
+    remove_column_if_exists(:scheduled_workflows, :last_error_at, :utc_datetime_usec, prefix)
+    remove_column_if_exists(:scheduled_workflows, :consecutive_failures, :integer, prefix)
+    remove_column_if_exists(:scheduled_workflows, :auto_disabled_at, :utc_datetime_usec, prefix)
 
     :ok
   end

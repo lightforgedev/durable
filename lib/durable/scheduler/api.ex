@@ -27,6 +27,7 @@ defmodule Durable.Scheduler.API do
   alias Crontab.Scheduler
   alias Durable.Config
   alias Durable.Repo
+  alias Durable.Storage.Dialect
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @type schedule_opts :: [
@@ -89,7 +90,7 @@ defmodule Durable.Scheduler.API do
 
       attrs = %{
         name: schedule_name,
-        workflow_module: inspect(module),
+        workflow_module: Atom.to_string(module),
         workflow_name: workflow_name,
         cron_expression: cron_expression,
         timezone: Keyword.get(opts, :timezone, "UTC"),
@@ -315,12 +316,6 @@ defmodule Durable.Scheduler.API do
   def register(module, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
 
-    # Modules are lazy-loaded in dev; `function_exported?/3` returns false
-    # for an existing-but-not-yet-loaded module, which would silently skip
-    # registration at scheduler boot. Force the load first so the export
-    # check is meaningful.
-    _ = Code.ensure_loaded(module)
-
     if function_exported?(module, :__schedules__, 0) do
       schedules = module.__schedules__()
       register_schedules(module, schedules, durable_name)
@@ -356,10 +351,8 @@ defmodule Durable.Scheduler.API do
     now = DateTime.utc_now()
 
     query =
-      from(s in ScheduledWorkflow,
-        where: s.enabled == true and s.next_run_at <= ^now,
-        lock: "FOR UPDATE SKIP LOCKED"
-      )
+      from(s in ScheduledWorkflow, where: s.enabled == true and s.next_run_at <= ^now)
+      |> Dialect.for_update_skip_locked(config)
 
     Repo.all(config, query)
   end
@@ -467,7 +460,7 @@ defmodule Durable.Scheduler.API do
         from(s in q, where: s.enabled == ^enabled)
 
       {:workflow_module, module}, q when is_atom(module) ->
-        module_str = inspect(module)
+        module_str = Atom.to_string(module)
         from(s in q, where: s.workflow_module == ^module_str)
 
       {:queue, queue}, q ->
@@ -554,7 +547,7 @@ defmodule Durable.Scheduler.API do
          {:ok, next_run} <- compute_next_run(cron, timezone) do
       attrs = %{
         name: name,
-        workflow_module: inspect(module),
+        workflow_module: Atom.to_string(module),
         workflow_name: workflow_name,
         cron_expression: cron,
         timezone: timezone,

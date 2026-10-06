@@ -57,6 +57,42 @@ children = [
 ]
 ```
 
+### Storage: PostgreSQL or SQLite
+
+PostgreSQL is the default. SQLite is for single-node hosts, such as a
+desktop app. Durable picks the dialect from the repo's Ecto adapter
+(`Durable.Storage.Dialect`); the public API is the same on both.
+
+| | PostgreSQL | SQLite |
+| --- | --- | --- |
+| Tables | in the `durable` schema (`:prefix`) | unprefixed, in the repo's database file |
+| Job claim | `FOR UPDATE SKIP LOCKED` | read and claim inside one `BEGIN IMMEDIATE` transaction |
+| Row locks (`FOR UPDATE`) | yes | none needed: Durable's transactions are `IMMEDIATE` (one writer) |
+| JSON columns | `jsonb` | TEXT holding JSON |
+| Multiple nodes | yes | no: one node (one database file) |
+
+To use SQLite, add `ecto_sqlite3` and compile Durable without a schema
+prefix (Ecto schema prefixes are compile-time, and SQLite has no schemas):
+
+```elixir
+# mix.exs
+{:ecto_sqlite3, "~> 0.23.0"}
+
+# config/config.exs
+config :durable, schema_prefix: nil
+
+config :my_app, MyApp.Repo,
+  database: "/path/to/app.sqlite3",
+  journal_mode: :wal,
+  busy_timeout: 5_000,
+  synchronous: :normal
+```
+
+Durable refuses to start with a SQLite repo if it was compiled with a prefix.
+Run Durable's own suite on either database with
+`DURABLE_TEST_DB=sqlite mix test` (default: PostgreSQL); tests tagged
+`:postgres_only` cover PostgreSQL schemas and are skipped on SQLite.
+
 ### 3. Define & Run
 
 ```elixir

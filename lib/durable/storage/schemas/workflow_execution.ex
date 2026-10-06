@@ -31,6 +31,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           context: map(),
           current_step: String.t() | nil,
           error: map() | nil,
+          retry_count: non_neg_integer(),
+          last_retried_at: DateTime.t() | nil,
           parent_workflow_id: Ecto.UUID.t() | nil,
           scheduled_at: DateTime.t() | nil,
           started_at: DateTime.t() | nil,
@@ -45,7 +47,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  @schema_prefix "durable"
+  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
+  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
   schema "workflow_executions" do
     field(:workflow_module, :string)
     field(:workflow_name, :string)
@@ -71,6 +74,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:context, :map, default: %{})
     field(:current_step, :string)
     field(:error, :map)
+    field(:retry_count, :integer, default: 0)
+    field(:last_retried_at, :utc_datetime_usec)
     field(:parent_workflow_id, :binary_id)
     field(:scheduled_at, :utc_datetime_usec)
     field(:started_at, :utc_datetime_usec)
@@ -100,6 +105,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :context,
     :current_step,
     :error,
+    :retry_count,
+    :last_retried_at,
     :parent_workflow_id,
     :scheduled_at,
     :started_at,

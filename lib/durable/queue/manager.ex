@@ -62,6 +62,17 @@ defmodule Durable.Queue.Manager do
   end
 
   @doc """
+  Wakes a queue poller without changing pause/drain state.
+  """
+  @spec wake(atom(), atom() | String.t()) :: :ok
+  def wake(durable_name \\ Durable, queue_name) do
+    queue_name
+    |> normalize_queue_name()
+    |> poller_name(durable_name)
+    |> Poller.wake()
+  end
+
+  @doc """
   Drains a queue, waiting for active jobs to complete.
   """
   @spec drain(atom(), atom() | String.t(), timeout()) :: :ok | {:error, :timeout}
@@ -92,7 +103,7 @@ defmodule Durable.Queue.Manager do
 
     queue_name
     |> normalize_queue_name()
-    |> then(&Adapter.default_adapter().get_stats(config, &1))
+    |> then(&Adapter.for_config(config).get_stats(config, &1))
   end
 
   @doc """
@@ -133,19 +144,26 @@ defmodule Durable.Queue.Manager do
       worker_sup_name = worker_supervisor_name(queue_str, config.name)
 
       [
-        # DynamicSupervisor for workers
-        {DynamicSupervisor, name: worker_sup_name, strategy: :one_for_one},
+        # DynamicSupervisor for workers. Ids are per queue: with the default
+        # module ids a second queue was a duplicate child spec.
+        Supervisor.child_spec(
+          {DynamicSupervisor, name: worker_sup_name, strategy: :one_for_one},
+          id: {DynamicSupervisor, queue_str}
+        ),
 
         # Poller for this queue
-        {Poller,
-         [
-           config: config,
-           queue_name: queue_str,
-           concurrency: Keyword.get(opts, :concurrency, 10),
-           poll_interval: Keyword.get(opts, :poll_interval, 1000),
-           worker_supervisor: worker_sup_name,
-           name: poller_name(queue_str, config.name)
-         ]}
+        Supervisor.child_spec(
+          {Poller,
+           [
+             config: config,
+             queue_name: queue_str,
+             concurrency: Keyword.get(opts, :concurrency, 10),
+             poll_interval: Keyword.get(opts, :poll_interval, 1000),
+             worker_supervisor: worker_sup_name,
+             name: poller_name(queue_str, config.name)
+           ]},
+          id: {Poller, queue_str}
+        )
       ]
     end)
   end

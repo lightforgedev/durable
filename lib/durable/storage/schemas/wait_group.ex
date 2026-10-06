@@ -9,6 +9,8 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   import Ecto.Changeset
   import Ecto.Query
 
+  alias Durable.Storage.Dialect
+
   @type wait_type :: :any | :all
 
   @type status :: :pending | :completed | :timeout | :cancelled
@@ -33,7 +35,8 @@ defmodule Durable.Storage.Schemas.WaitGroup do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  @schema_prefix "durable"
+  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
+  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
   schema "wait_groups" do
     field(:step_name, :string)
 
@@ -137,10 +140,8 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   """
   def add_event_locked(repo, wait_group_id, event_name, payload) do
     query =
-      from(w in __MODULE__,
-        where: w.id == ^wait_group_id,
-        lock: "FOR UPDATE"
-      )
+      from(w in __MODULE__, where: w.id == ^wait_group_id)
+      |> Dialect.for_update(repo)
 
     case repo.one(query) do
       nil ->

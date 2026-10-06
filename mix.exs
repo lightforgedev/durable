@@ -1,19 +1,10 @@
 defmodule Durable.MixProject do
   use Mix.Project
 
-  # Shared monorepo metadata. Canonical values live in ../shared.exs; Hex
-  # tarballs can't reference files outside the package root, so we copy that
-  # file next to this mix.exs (the copy is what ships) and read it back.
-  # Edit ../shared.exs, never the git-ignored copy beside this file.
-  shared_src = Path.join(__DIR__, "../shared.exs")
-  shared_dst = Path.join(__DIR__, "shared.exs")
-
-  if File.exists?(shared_src) and
-       (not File.exists?(shared_dst) or File.read!(shared_dst) != File.read!(shared_src)) do
-    File.cp!(shared_src, shared_dst)
-  end
-
-  {shared, _bindings} = Code.eval_file(shared_dst)
+  # Lightforge distributes Durable as a standalone repository, unlike the
+  # upstream monorepo. Keep the package metadata beside mix.exs so every clone
+  # and Hex build is self-contained.
+  {shared, _bindings} = Code.eval_file(Path.join(__DIR__, "shared.exs"))
 
   # Versioned independently of durable_dashboard.
   @version "0.1.0-rc"
@@ -68,6 +59,9 @@ defmodule Durable.MixProject do
       {:crontab, "~> 1.1"},
       {:igniter, "~> 0.6", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
+      # SQLite storage (single-node hosts, e.g. a desktop app). 0.23 is the
+      # last line on ecto ~> 3.13.0 and decimal 2.x, which the Platform pins.
+      {:ecto_sqlite3, "~> 0.23.0", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},

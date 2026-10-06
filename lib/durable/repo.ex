@@ -22,6 +22,7 @@ defmodule Durable.Repo do
   """
 
   alias Durable.Config
+  alias Durable.Storage.Dialect
   alias Ecto.Adapters.SQL
 
   @doc """
@@ -126,17 +127,13 @@ defmodule Durable.Repo do
     config.repo.delete_all(queryable, merge_opts(config, opts))
   end
 
-  # ============================================================================
-  # Transactions
-  # ============================================================================
-
   @doc """
-  Runs an `Ecto.Multi` (or a function) inside a database transaction on the
-  configured repo. Used to atomically couple state transitions (e.g. marking
-  a PendingInput `:timeout` and resuming the workflow it belongs to) so a
-  crash between the two updates can't orphan the workflow.
+  Runs an `Ecto.Multi` or function transaction using the configured repo.
+
+  On SQLite the transaction starts `IMMEDIATE` (see `Durable.Storage.Dialect`).
   """
   def transaction(%Config{} = config, fun_or_multi, opts \\ []) do
+    opts = Keyword.merge(Dialect.transaction_opts(config), opts)
     config.repo.transaction(fun_or_multi, merge_opts(config, opts))
   end
 

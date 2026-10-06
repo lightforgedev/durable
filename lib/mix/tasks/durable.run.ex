@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Durable.Run do
 
   @impl Mix.Task
   def run(args) do
-    Helpers.ensure_started_readonly()
+    Helpers.ensure_started()
 
     {opts, positional, _} =
       OptionParser.parse(args,

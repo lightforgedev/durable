@@ -157,7 +157,10 @@ defmodule Durable.Queue.StaleJobRecoveryIntegrationTest do
       workflow_module: "TestWorkflow",
       workflow_name: Keyword.get(opts, :workflow_name, "test"),
       status: Keyword.get(opts, :status, :pending),
-      queue: "default",
+      # A queue no poller serves: once recovery resets a row to :pending, the
+      # live "default" poller (50 ms) would otherwise re-claim it before the
+      # assertions read it. Recovery itself is queue-agnostic.
+      queue: "recovery_only",
       priority: 0,
       input: %{},
       context: %{},

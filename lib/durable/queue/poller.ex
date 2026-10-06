@@ -85,6 +85,21 @@ defmodule Durable.Queue.Poller do
   end
 
   @doc """
+  Schedules an immediate poll without changing pause/drain state.
+  """
+  @spec wake(GenServer.server()) :: :ok
+  def wake(server) when is_atom(server) do
+    case Process.whereis(server) do
+      nil -> :ok
+      _pid -> GenServer.cast(server, :wake)
+    end
+  end
+
+  def wake(server) do
+    GenServer.cast(server, :wake)
+  end
+
+  @doc """
   Drains the poller, waiting for all active jobs to complete.
 
   Returns `:ok` when all jobs are complete or `{:error, :timeout}` if
@@ -180,6 +195,11 @@ defmodule Durable.Queue.Poller do
   end
 
   @impl true
+  def handle_cast(:wake, state) do
+    {:noreply, schedule_poll(state, 0)}
+  end
+
+  @impl true
   def handle_info(:poll, state) do
     state = %{state | timer_ref: nil}
 
@@ -202,7 +222,11 @@ defmodule Durable.Queue.Poller do
       "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
     )
 
-    state = handle_job_completion(state, job_id, result)
+    state =
+      state
+      |> handle_job_completion(job_id, result)
+      |> schedule_poll(0)
+
     {:noreply, state}
   end
 
@@ -251,7 +275,7 @@ defmodule Durable.Queue.Poller do
     available_slots = state.concurrency - MapSet.size(state.active_jobs)
 
     if available_slots > 0 do
-      adapter = Adapter.default_adapter()
+      adapter = Adapter.for_config(state.config)
       jobs = adapter.fetch_jobs(state.config, state.queue_name, available_slots, state.node_id)
 
       emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
@@ -286,7 +310,7 @@ defmodule Durable.Queue.Poller do
   end
 
   defp handle_job_completion(state, job_id, result) do
-    adapter = Adapter.default_adapter()
+    adapter = Adapter.for_config(state.config)
     token = Map.get(state.job_tokens, job_id)
 
     case result do

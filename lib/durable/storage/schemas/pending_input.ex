@@ -38,7 +38,8 @@ defmodule Durable.Storage.Schemas.PendingInput do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  @schema_prefix "durable"
+  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
+  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
   schema "pending_inputs" do
     field(:input_name, :string)
     field(:step_name, :string)

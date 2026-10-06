@@ -188,7 +188,7 @@ defmodule Durable.Executor.StepRunner do
     # fallback, not the source of truth).
     child_id = if wait_type == :call_workflow, do: opts[:child_id], else: nil
     {:ok, _} = update_step_execution(config, step_exec, :waiting, child_id)
-    {wait_type, opts}
+    {wait_type, Keyword.put(opts, :__durable_context, Context.context())}
   end
 
   # Handle errors with retry
