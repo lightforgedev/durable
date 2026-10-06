@@ -22,6 +22,8 @@ defmodule Durable.Integration.ConcurrencyTest do
   alias Durable.Storage.Schemas.{PendingEvent, WaitGroup, WorkflowExecution}
   alias Ecto.Adapters.SQL.Sandbox
 
+  import Ecto.Query
+
   @repo Durable.TestRepo
 
   setup do
@@ -85,6 +87,35 @@ defmodule Durable.Integration.ConcurrencyTest do
       # Every job is claimed exactly once across the two workers.
       assert length(a) + length(b) == 40
       assert MapSet.size(MapSet.new(a ++ b)) == 40
+    end
+  end
+
+  describe "Durable.start/3 idempotency under real contention" do
+    test "concurrent identical starts admit exactly one run", %{config: _config} do
+      start = fn ->
+        committed(fn ->
+          Durable.start(
+            Durable.Integration.IdempotentStartWorkflow,
+            %{request_id: "concurrent-1"},
+            idempotency_key: "concurrent-1"
+          )
+        end)
+      end
+
+      results =
+        1..8
+        |> Enum.map(fn _index -> Task.async(start) end)
+        |> Task.await_many(15_000)
+
+      assert Enum.uniq(results) |> length() == 1
+      assert [{:ok, workflow_id}] = Enum.uniq(results)
+
+      assert committed(fn ->
+               @repo.aggregate(
+                 from(w in WorkflowExecution, where: w.id == ^workflow_id),
+                 :count
+               )
+             end) == 1
     end
   end
 
@@ -160,5 +191,13 @@ defmodule Durable.Integration.ConcurrencyTest do
       # Exactly one task observed the group transition to :completed.
       assert committed(fn -> @repo.get!(WaitGroup, wg_id).status end) == :completed
     end
+  end
+end
+
+defmodule Durable.Integration.IdempotentStartWorkflow do
+  use Durable
+
+  workflow "concurrent_idempotent_start" do
+    step(:complete, fn data -> {:ok, data} end)
   end
 end

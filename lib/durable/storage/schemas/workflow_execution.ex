@@ -27,6 +27,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           status: status(),
           queue: String.t(),
           priority: integer(),
+          idempotency_key: String.t() | nil,
+          idempotency_fingerprint: String.t() | nil,
           input: map(),
           context: map(),
           current_step: String.t() | nil,
@@ -70,6 +72,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
 
     field(:queue, :string, default: "default")
     field(:priority, :integer, default: 0)
+    field(:idempotency_key, :string)
+    field(:idempotency_fingerprint, :string)
     field(:input, :map, default: %{})
     field(:context, :map, default: %{})
     field(:current_step, :string)
@@ -101,6 +105,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :status,
     :queue,
     :priority,
+    :idempotency_key,
+    :idempotency_fingerprint,
     :input,
     :context,
     :current_step,
@@ -124,6 +130,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     execution
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
+    |> unique_constraint(:idempotency_key,
+      name: :workflow_executions_idempotency_key_index
+    )
   end
 
   @doc """

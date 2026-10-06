@@ -820,6 +820,42 @@ defmodule Durable.Wait do
   # ============================================================================
 
   @doc """
+  Lists every pending input and event wait for one workflow execution.
+
+  This query is intentionally unbounded because `workflow_id` selects one run.
+  """
+  @spec pending_waits(String.t(), keyword()) :: [map()]
+  def pending_waits(workflow_id, opts \\ []) do
+    config = get_config(opts)
+
+    inputs =
+      from(p in PendingInput,
+        where: p.workflow_id == ^workflow_id and p.status == :pending,
+        order_by: [asc: p.inserted_at]
+      )
+      |> then(&Repo.all(config, &1))
+      |> Enum.map(fn pending ->
+        pending
+        |> pending_input_to_map()
+        |> Map.merge(%{kind: :input, name: pending.input_name})
+      end)
+
+    events =
+      from(p in PendingEvent,
+        where: p.workflow_id == ^workflow_id and p.status == :pending,
+        order_by: [asc: p.inserted_at]
+      )
+      |> then(&Repo.all(config, &1))
+      |> Enum.map(fn pending ->
+        pending
+        |> pending_event_to_map()
+        |> Map.merge(%{kind: :event, name: pending.event_name})
+      end)
+
+    inputs ++ events
+  end
+
+  @doc """
   Lists pending inputs for workflows.
 
   ## Filters

@@ -39,6 +39,8 @@ defmodule Durable.Executor do
   - `:queue` - The queue to use (default: "default")
   - `:priority` - Priority level (default: 0)
   - `:scheduled_at` - Schedule for future execution
+  - `:idempotency_key` - Reuse an existing run when the same request is retried
+  - `:return_admission` - Include `:started` or `:existing` in the success tuple
   - `:durable` - The Durable instance name (default: Durable)
 
   ## Returns
@@ -46,22 +48,30 @@ defmodule Durable.Executor do
   - `{:ok, workflow_id}` on success
   - `{:error, reason}` on failure
   """
-  @spec start_workflow(module(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec start_workflow(module(), map(), keyword()) ::
+          {:ok, String.t()} | {:ok, String.t(), :started | :existing} | {:error, term()}
   def start_workflow(module, input, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
     with {:ok, workflow_def} <- get_workflow_definition(module, opts),
-         {:ok, execution} <- create_execution(config, module, workflow_def, input, opts) do
-      DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+         {:ok, execution, admission} <-
+           create_execution(config, module, workflow_def, input, opts) do
+      if admission == :started do
+        DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
 
-      if Keyword.get(opts, :inline, false) do
-        execute_workflow(execution.id, config)
-      else
-        QueueManager.wake(durable_name, execution.queue)
+        if Keyword.get(opts, :inline, false) do
+          execute_workflow(execution.id, config)
+        else
+          QueueManager.wake(durable_name, execution.queue)
+        end
       end
 
-      {:ok, execution.id}
+      if Keyword.get(opts, :return_admission, false) do
+        {:ok, execution.id, admission}
+      else
+        {:ok, execution.id}
+      end
     end
   end
 
@@ -356,21 +366,113 @@ defmodule Durable.Executor do
   end
 
   defp create_execution(config, module, %Workflow{} = workflow_def, input, opts) do
-    attrs = %{
-      workflow_module: Atom.to_string(module),
-      workflow_name: workflow_def.name,
-      status: :pending,
-      queue: Keyword.get(opts, :queue, "default") |> to_string(),
-      priority: Keyword.get(opts, :priority, 0),
-      input: input,
-      context: %{},
-      scheduled_at: Keyword.get(opts, :scheduled_at)
-    }
+    with {:ok, idempotency_key} <- normalize_idempotency_key(opts[:idempotency_key]) do
+      attrs = %{
+        workflow_module: Atom.to_string(module),
+        workflow_name: workflow_def.name,
+        status: :pending,
+        queue: Keyword.get(opts, :queue, "default") |> to_string(),
+        priority: Keyword.get(opts, :priority, 0),
+        idempotency_key: idempotency_key,
+        input: input,
+        context: %{},
+        scheduled_at: Keyword.get(opts, :scheduled_at)
+      }
 
-    %WorkflowExecution{}
-    |> WorkflowExecution.changeset(attrs)
-    |> Repo.insert(config)
+      attrs =
+        Map.put(attrs, :idempotency_fingerprint, idempotency_fingerprint(attrs, idempotency_key))
+
+      changeset = WorkflowExecution.changeset(%WorkflowExecution{}, attrs)
+
+      case Repo.insert(changeset, config) do
+        {:ok, execution} ->
+          {:ok, execution, :started}
+
+        {:error, changeset} when not is_nil(idempotency_key) ->
+          resolve_idempotent_conflict(config, changeset, idempotency_key, attrs)
+
+        {:error, changeset} ->
+          {:error, changeset}
+      end
+    end
   end
+
+  defp normalize_idempotency_key(nil), do: {:ok, nil}
+
+  defp normalize_idempotency_key(key) when is_binary(key) and byte_size(key) <= 255 do
+    if String.trim(key) == "", do: {:error, :invalid_idempotency_key}, else: {:ok, key}
+  end
+
+  defp normalize_idempotency_key(_key), do: {:error, :invalid_idempotency_key}
+
+  defp idempotency_fingerprint(_attrs, nil), do: nil
+
+  defp idempotency_fingerprint(attrs, _key) do
+    request =
+      Map.take(attrs, [
+        :workflow_module,
+        :workflow_name,
+        :queue,
+        :priority,
+        :input,
+        :scheduled_at
+      ])
+
+    :sha256
+    |> :crypto.hash(canonical_json(request))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp resolve_idempotent_conflict(config, changeset, key, attrs) do
+    if idempotency_key_conflict?(changeset) do
+      case Repo.get_by(config, WorkflowExecution, idempotency_key: key) do
+        %WorkflowExecution{idempotency_fingerprint: fingerprint} = execution
+        when fingerprint == attrs.idempotency_fingerprint ->
+          {:ok, execution, :existing}
+
+        %WorkflowExecution{} ->
+          {:error, :idempotency_conflict}
+
+        nil ->
+          {:error, changeset}
+      end
+    else
+      {:error, changeset}
+    end
+  end
+
+  defp idempotency_key_conflict?(changeset) do
+    Enum.any?(changeset.errors, fn
+      {:idempotency_key, {_message, metadata}} -> metadata[:constraint] == :unique
+      _error -> false
+    end)
+  end
+
+  defp canonical_json(%Date{} = value), do: Jason.encode!(value)
+  defp canonical_json(%DateTime{} = value), do: Jason.encode!(value)
+  defp canonical_json(%NaiveDateTime{} = value), do: Jason.encode!(value)
+  defp canonical_json(%Time{} = value), do: Jason.encode!(value)
+
+  defp canonical_json(value) when is_map(value) do
+    contents =
+      value
+      |> Enum.map(fn {key, item} -> {to_string(key), item} end)
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map_join(",", fn {key, item} ->
+        Jason.encode!(key) <> ":" <> canonical_json(item)
+      end)
+
+    "{" <> contents <> "}"
+  end
+
+  defp canonical_json(value) when is_list(value) do
+    "[" <> Enum.map_join(value, ",", &canonical_json/1) <> "]"
+  end
+
+  defp canonical_json(value) when is_atom(value) and value not in [true, false, nil],
+    do: Jason.encode!(Atom.to_string(value))
+
+  defp canonical_json(value), do: Jason.encode!(value)
 
   defp load_execution(config, workflow_id) do
     case Repo.get(config, WorkflowExecution, workflow_id) do
