@@ -2,22 +2,27 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, lightforge-main]
   pull_request:
-    branches: [main]
+    branches: [main, lightforge-main]
 
 env:
   MIX_ENV: test
 
 jobs:
   test:
-    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    name: Test (${{ matrix.database }} / Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         elixir: ["1.19"]
         otp: ["28"]
+        database: [postgres, sqlite]
+
+    env:
+      DURABLE_TEST_DB: ${{ matrix.database }}
 
     services:
       postgres:
@@ -53,8 +58,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _build
-          key: ${{ runner.os }}-build-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-build-${{ matrix.otp }}-${{ matrix.elixir }}-
+          key: ${{ runner.os }}-build-${{ matrix.database }}-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-build-${{ matrix.database }}-${{ matrix.otp }}-${{ matrix.elixir }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -67,6 +72,9 @@ jobs:
 
       - name: Run tests
         run: mix test
+
+      - name: Run real-connection concurrency tests
+        run: mix test --only integration
 
   credo:
     name: Credo
