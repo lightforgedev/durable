@@ -58,13 +58,7 @@ defmodule Durable.Executor do
          {:ok, execution, admission} <-
            create_execution(config, module, workflow_def, input, opts) do
       if admission == :started do
-        DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
-
-        if Keyword.get(opts, :inline, false) do
-          execute_workflow(execution.id, config)
-        else
-          QueueManager.wake(durable_name, execution.queue)
-        end
+        dispatch_execution(config, durable_name, execution, opts)
       end
 
       if Keyword.get(opts, :return_admission, false) do
@@ -72,6 +66,16 @@ defmodule Durable.Executor do
       else
         {:ok, execution.id}
       end
+    end
+  end
+
+  defp dispatch_execution(config, durable_name, execution, opts) do
+    DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+
+    if Keyword.get(opts, :inline, false) do
+      execute_workflow(execution.id, config)
+    else
+      QueueManager.wake(durable_name, execution.queue)
     end
   end
 
@@ -384,7 +388,7 @@ defmodule Durable.Executor do
 
       changeset = WorkflowExecution.changeset(%WorkflowExecution{}, attrs)
 
-      case Repo.insert(changeset, config) do
+      case insert_execution(changeset, config, idempotency_key) do
         {:ok, execution} ->
           {:ok, execution, :started}
 
@@ -395,6 +399,20 @@ defmodule Durable.Executor do
           {:error, changeset}
       end
     end
+  end
+
+  defp insert_execution(changeset, config, nil), do: Repo.insert(changeset, config)
+
+  # A uniqueness error aborts a caller-owned PostgreSQL transaction unless the
+  # statement rolls back to a savepoint before the existing run is queried.
+  defp insert_execution(changeset, config, _idempotency_key) do
+    Repo.insert(changeset, config, idempotent_insert_opts(config))
+  end
+
+  defp idempotent_insert_opts(config) do
+    if Dialect.of(config) == :postgres and config.repo.in_transaction?(),
+      do: [mode: :savepoint],
+      else: []
   end
 
   defp normalize_idempotency_key(nil), do: {:ok, nil}

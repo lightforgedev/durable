@@ -38,6 +38,23 @@ defmodule Durable.IdempotentStartTest do
              Durable.start(Workflow, %{order_id: "order-1"}, opts)
   end
 
+  @tag :postgres_only
+  test "duplicate admission composes inside a caller transaction" do
+    repo = Config.get(Durable).repo
+    opts = [idempotency_key: "transaction-request", return_admission: true]
+
+    assert {:ok, {workflow_id, workflow_id}} =
+             repo.transaction(fn ->
+               assert {:ok, workflow_id, :started} =
+                        Durable.start(Workflow, %{order_id: "order-transaction"}, opts)
+
+               assert {:ok, same_workflow_id, :existing} =
+                        Durable.start(Workflow, %{order_id: "order-transaction"}, opts)
+
+               {workflow_id, same_workflow_id}
+             end)
+  end
+
   test "same key with a different request fails closed" do
     assert {:ok, _workflow_id} =
              Durable.start(Workflow, %{order_id: "order-1"}, idempotency_key: "request-2")
