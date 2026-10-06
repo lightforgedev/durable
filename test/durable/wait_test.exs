@@ -1138,6 +1138,37 @@ defmodule Durable.WaitTest do
     end
   end
 
+  describe "pending_waits/2" do
+    test "returns every pending wait for one run and no waits from another run" do
+      config = Config.get(Durable)
+      {:ok, input_execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
+      {:ok, event_execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
+
+      %PendingEvent{}
+      |> PendingEvent.changeset(%{
+        workflow_id: input_execution.id,
+        event_name: "follow_up",
+        step_name: "manual_follow_up"
+      })
+      |> config.repo.insert!()
+
+      waits = Durable.pending_waits(input_execution.id)
+
+      assert length(waits) == 2
+      assert Enum.any?(waits, &match?(%{kind: :input, name: "manager_approval"}, &1))
+      assert Enum.any?(waits, &match?(%{kind: :event, name: "follow_up"}, &1))
+      assert Enum.all?(waits, &(&1.workflow_id == input_execution.id))
+
+      refute Enum.any?(waits, fn pending ->
+               pending.workflow_id == event_execution.id
+             end)
+    end
+
+    test "returns an empty list for an unknown run" do
+      assert Durable.pending_waits(Ecto.UUID.generate()) == []
+    end
+  end
+
   describe "list_pending_events/1" do
     test "returns pending events with default filters" do
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})

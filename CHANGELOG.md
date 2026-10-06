@@ -3,6 +3,10 @@
 ## Unreleased (branch `feat/sqlite`, from `lightforge-main` @ 86aa946)
 
 ### Added
+- Atomic idempotent workflow admission with `Durable.start/3`'s optional
+  `:idempotency_key`. Same-request retries return the original run; conflicting
+  key reuse fails with `:idempotency_conflict`.
+- `Durable.pending_waits/2` for unbounded, run-targeted input/event discovery.
 - SQLite storage. Durable picks the dialect from the repo's Ecto adapter
   (`Durable.Storage.Dialect`). `ecto_sqlite3 ~> 0.23.0` is an optional
   dependency. The 0.23 line is the last on `ecto ~> 3.13.0` and decimal 2.x.

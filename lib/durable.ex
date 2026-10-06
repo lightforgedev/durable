@@ -201,9 +201,21 @@ defmodule Durable do
       )
 
   """
-  @spec start(module(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec start(module(), map(), keyword()) ::
+          {:ok, String.t()} | {:ok, String.t(), :started | :existing} | {:error, term()}
   def start(module, input, opts \\ []) do
     Durable.Executor.start_workflow(module, input, opts)
+  end
+
+  @doc """
+  Lists the pending input and event waits for one workflow execution.
+
+  The query is run-scoped and returns an empty list when the execution has no
+  pending waits or does not exist. Hosts remain responsible for authorization.
+  """
+  @spec pending_waits(String.t(), keyword()) :: [map()]
+  def pending_waits(workflow_id, opts \\ []) do
+    Durable.Wait.pending_waits(workflow_id, opts)
   end
 
   @doc """
