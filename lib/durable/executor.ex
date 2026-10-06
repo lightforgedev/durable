@@ -414,8 +414,7 @@ defmodule Durable.Executor do
         :workflow_name,
         :queue,
         :priority,
-        :input,
-        :scheduled_at
+        :input
       ])
 
     :sha256

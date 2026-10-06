@@ -46,6 +46,26 @@ defmodule Durable.IdempotentStartTest do
              Durable.start(Workflow, %{order_id: "order-2"}, idempotency_key: "request-2")
   end
 
+  test "recomputing scheduled_at on retry returns the original run" do
+    first_schedule = DateTime.add(DateTime.utc_now(), 60, :second)
+    retry_schedule = DateTime.add(first_schedule, 1, :second)
+
+    assert {:ok, workflow_id} =
+             Durable.start(Workflow, %{order_id: "order-3"},
+               idempotency_key: "request-3",
+               scheduled_at: first_schedule
+             )
+
+    assert {:ok, ^workflow_id} =
+             Durable.start(Workflow, %{order_id: "order-3"},
+               idempotency_key: "request-3",
+               scheduled_at: retry_schedule
+             )
+
+    execution = Config.get(Durable).repo.get!(WorkflowExecution, workflow_id)
+    assert execution.scheduled_at == first_schedule
+  end
+
   test "omitting a key preserves non-idempotent starts" do
     assert {:ok, first_id} = Durable.start(Workflow, %{order_id: "order-1"})
     assert {:ok, second_id} = Durable.start(Workflow, %{order_id: "order-1"})

@@ -41,7 +41,8 @@ Lightforge owns these fork changes. No upstream request or upstream acceptance i
 | --- | --- |
 | Start | `Durable.start/3` accepts optional `:idempotency_key`; omitted keys preserve existing behavior. |
 | Identity | The key is opaque, non-empty, bounded, and unique within one Durable storage namespace. Hosts namespace or hash business identity before calling. |
-| Fingerprint | Module, workflow name, normalized input, queue, priority, and schedule determine the immutable request fingerprint. |
+| Fingerprint | Module, workflow name, normalized input, queue, and priority determine the immutable request fingerprint. |
+| Schedule retry | `scheduled_at` is first-admission metadata. A retry may recompute it; the winning run retains its original schedule. |
 | Duplicate | Same key and fingerprint returns the existing run without a second start event, queue wake, or inline execution. |
 | Admission receipt | `:return_admission` adds `:started` or `:existing` for trusted host adapters; the default return remains `{:ok, run_id}`. |
 | Conflict | Same key and different fingerprint returns `{:error, :idempotency_conflict}`. |
@@ -94,7 +95,8 @@ authorized pending_waits/provide_input/send_event
 | --- | --- | --- |
 | Same key, sequential duplicate | One execution ID and row | Durable focused test |
 | Same key, concurrent duplicate | One committed row; every caller receives its ID | Real-connection PostgreSQL and SQLite integration test |
-| Same key, changed input/workflow/options | `:idempotency_conflict`; original row unchanged | Durable focused test |
+| Same key, changed input/workflow/queue/priority | `:idempotency_conflict`; original row unchanged | Durable focused test |
+| Same key, recomputed schedule | Existing run and original schedule returned | Durable focused test |
 | No key | Two calls retain current two-run behavior | Durable compatibility test |
 | Run with input and event waits | Combined query returns only that run's waits | Durable wait test |
 | Unknown run | Empty wait list; no global fallback | Durable wait test |
