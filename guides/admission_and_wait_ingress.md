@@ -109,8 +109,8 @@ authorized pending_waits/provide_input/send_event
 | --- | --- |
 | Durable SQLite predecessor | Open PR #18 at `97741fa`; this work is stacked on that exact head. |
 | Engine SQLite predecessor | Open PR #46 at `dd4ade1`; engine work is stacked on that exact head. |
-| PostgreSQL validation | Durable focused suite: 82 tests; real-concurrency suite: 3 tests. Engine focused API/migration suite: 30 tests. All passed on 2026-10-06. |
-| SQLite validation | Durable focused suite: 81 tests; real-concurrency suite: 3 tests. Engine focused API/migration suite: 25 tests. All passed on 2026-10-06. |
+| PostgreSQL validation | Durable focused suite: 82 tests; real-concurrency suite: 3 tests. Engine full suite against locked Durable commit `135fc82`: 367 tests, 0 failures. Passed on 2026-10-06. |
+| SQLite validation | Durable full suite including integration: 444 tests, 0 failures. Engine full suite against locked Durable commit `135fc82`: 367 tests, 0 failures. Passed on 2026-10-06. |
 | Phoenix setup integration | Out of this slice; must consume the released fork commits before removing app workarounds. |
 
 Deployment order: Durable migration and code, then AegisDurableEngine migration/code, then Phoenix setup callers. Rollback keeps nullable admission columns until no deployed caller supplies an idempotency key.
