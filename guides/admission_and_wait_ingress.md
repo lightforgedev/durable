@@ -9,7 +9,7 @@ Durable owns atomic start deduplication and run-scoped wait discovery; host libr
 | Last reviewed | 2026-10-06 |
 | Review cadence | On admission, wait, migration, or storage-dialect changes |
 | Canon status | active |
-| Related pointers | Bead `aegis-brtav`; Durable PR #18; AegisDurableEngine PR #46 |
+| Related pointers | Bead `aegis-brtav`; merged Durable PR #18; merged AegisDurableEngine PR #46 |
 
 ## Outcome and acceptance bar
 
@@ -107,10 +107,10 @@ authorized pending_waits/provide_input/send_event
 
 | Gate | Status |
 | --- | --- |
-| Durable SQLite predecessor | Open PR #18 at `97741fa`; this work is stacked on that exact head. |
-| Engine SQLite predecessor | Open PR #46 at `dd4ade1`; engine work is stacked on that exact head. |
-| PostgreSQL validation | Durable focused suite: 82 tests; real-concurrency suite: 3 tests. Engine full suite against locked Durable commit `135fc82`: 367 tests, 0 failures. Passed on 2026-10-06. |
-| SQLite validation | Durable full suite including integration: 444 tests, 0 failures. Engine full suite against locked Durable commit `135fc82`: 367 tests, 0 failures. Passed on 2026-10-06. |
+| Durable SQLite predecessor | PR #18 merged from `97741fa`; this branch is rebased on its `lightforge-main` squash merge `0e53a25`. |
+| Engine SQLite predecessor | PR #46 merged from `dd4ade1`; engine work is rebased on its `main` squash merge `a8085ef`. |
+| PostgreSQL validation | Durable focused suite: 82 tests; real-concurrency suite: 3 tests. Engine full suite against the same Durable implementation tree: 367 tests, 0 failures. Passed on 2026-10-06. |
+| SQLite validation | Durable full suite including integration: 444 tests, 0 failures. Engine full suite against the same Durable implementation tree: 367 tests, 0 failures. Passed on 2026-10-06. |
 | Phoenix setup integration | Out of this slice; must consume the released fork commits before removing app workarounds. |
 
 Deployment order: Durable migration and code, then AegisDurableEngine migration/code, then Phoenix setup callers. Rollback keeps nullable admission columns until no deployed caller supplies an idempotency key.
