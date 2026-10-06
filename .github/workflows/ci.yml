@@ -1,10 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches: [main, lightforge-main, "feat/**"]
-  pull_request:
-    branches: [main, lightforge-main]
+  workflow_dispatch:
 
 env:
   MIX_ENV: test
