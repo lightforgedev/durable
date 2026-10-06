@@ -43,7 +43,7 @@ Lightforge owns these fork changes. No upstream request or upstream acceptance i
 | Identity | The key is opaque, non-empty, bounded, and unique within one Durable storage namespace. Hosts namespace or hash business identity before calling. |
 | Fingerprint | Module, workflow name, normalized input, queue, and priority determine the immutable request fingerprint. |
 | Schedule retry | `scheduled_at` is first-admission metadata. A retry may recompute it; the winning run retains its original schedule. |
-| Duplicate | Same key and fingerprint returns the existing run without a second start event, queue wake, or inline execution. |
+| Duplicate | Same key and fingerprint returns the existing run without a second start event, queue wake, or inline execution, including inside a caller-owned PostgreSQL transaction. |
 | Admission receipt | `:return_admission` adds `:started` or `:existing` for trusted host adapters; the default return remains `{:ok, run_id}`. |
 | Conflict | Same key and different fingerprint returns `{:error, :idempotency_conflict}`. |
 | Re-enrolment | A deliberate new enrolment supplies a new host-derived generation key. Terminal status does not implicitly permit key reuse. |
@@ -95,6 +95,7 @@ authorized pending_waits/provide_input/send_event
 | --- | --- | --- |
 | Same key, sequential duplicate | One execution ID and row | Durable focused test |
 | Same key, concurrent duplicate | One committed row; every caller receives its ID | Real-connection PostgreSQL and SQLite integration test |
+| Same key, duplicate in caller transaction | Existing run returned; caller transaction remains usable | PostgreSQL focused regression |
 | Same key, changed input/workflow/queue/priority | `:idempotency_conflict`; original row unchanged | Durable focused test |
 | Same key, recomputed schedule | Existing run and original schedule returned | Durable focused test |
 | No key | Two calls retain current two-run behavior | Durable compatibility test |
@@ -111,8 +112,8 @@ authorized pending_waits/provide_input/send_event
 | --- | --- |
 | Durable SQLite predecessor | PR #18 merged from `97741fa`; this branch is rebased on its `lightforge-main` squash merge `0e53a25`. |
 | Engine SQLite predecessor | PR #46 merged from `dd4ade1`; engine work is rebased on its `main` squash merge `a8085ef`. |
-| PostgreSQL validation | Durable focused suite: 82 tests; real-concurrency suite: 3 tests. Engine full suite against the same Durable implementation tree: 367 tests, 0 failures. Passed on 2026-10-06. |
-| SQLite validation | Durable full suite including integration: 444 tests, 0 failures. Engine full suite against the same Durable implementation tree: 367 tests, 0 failures. Passed on 2026-10-06. |
+| PostgreSQL validation | Durable default suite: 446 tests; real-concurrency suite: 3 tests. Engine full suite against the prior Durable implementation tree: 367 tests, 0 failures. Passed on 2026-10-06; downstream Engine refresh remains open for this repair head. |
+| SQLite validation | Durable default suite: 442 tests; real-concurrency suite: 3 tests. Engine full suite against the prior Durable implementation tree: 367 tests, 0 failures. Passed on 2026-10-06; downstream Engine refresh remains open for this repair head. |
 | Phoenix setup integration | Out of this slice; must consume the released fork commits before removing app workarounds. |
 
 Deployment order: Durable migration and code, then AegisDurableEngine migration/code, then Phoenix setup callers. Rollback keeps nullable admission columns until no deployed caller supplies an idempotency key.
