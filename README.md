@@ -130,6 +130,12 @@ end
 
 # Start it
 {:ok, id} = Durable.start(MyApp.OrderWorkflow, %{"id" => "order_123", "items" => items})
+
+# Retry-safe admission returns the original run for the same request
+{:ok, same_id} =
+  Durable.start(MyApp.OrderWorkflow, %{"id" => "order_123", "items" => items},
+    idempotency_key: "order/order_123/enrolment/1"
+  )
 ```
 
 ## Examples
@@ -524,9 +530,11 @@ end
 ```elixir
 Durable.start(Module, input)
 Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
+Durable.start(Module, input, idempotency_key: key)
 Durable.get_execution(id)
 Durable.list_executions(workflow: Module, status: :running)
 Durable.cancel(id, "reason")
+Durable.pending_waits(id)
 Durable.send_event(id, "event", payload)
 Durable.provide_input(id, "input_name", data)
 Durable.list_children(parent_id)
