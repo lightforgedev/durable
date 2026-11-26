@@ -115,3 +115,31 @@ adapters as the sync gate.
 5. Phoenix: deps + host migration + baseline + raw-SQL status fixes; `mix test`; then Hugo runs workflow e2e.
 5b. connect-phoenix: pins + `sparse`; suite + flows harness on SQLite.
 6. Rollout per the mixed-version contract (§5): expand → drain → deploy one set → enable; dev cluster first, then Fly with kill timeout ≥ 30 s.
+
+## 8. Gap 2 results (2026-11-27): Lightforge tests run against upstream 2.2.0
+
+Method: each Lightforge-added test, from June base `a37f6c5` to `lightforge-main`, was copied into an upstream `a6e4467`
+`durable/` worktree and run with `--include integration` on a throwaway PG 18. Upstream's own suite is the baseline:
+1429 passed, 0 failed (598 integration excluded). 21 Lightforge tests ran: 7 pass, 14 fail.
+
+| Test (LF file) | Result on upstream | Classification → action |
+|---|---|---|
+| two queues run work (queue/manager) | pass | covered, drop ours |
+| event resume wakes the queue (wait) | pass | covered, drop ours |
+| atom/tuple/binary errors normalized (error_normalization ×3) | pass | covered, drop ours |
+| `Context.input/0` readable in steps (context_input) | pass | covered, drop ours |
+| **context written before a step error is persisted** (error_normalization) | fail: `context["failure_evidence"]` nil | **real gap → carry** (Phoenix review/failure evidence relies on it) |
+| `pending_waits/1` ×2 (wait) | fail: undefined | **carry** in engine (§4) |
+| **retry re-executes only the failed step** (resume_edge_cases) | fail: step2 never re-ran | **real gap or semantics change → verify** against upstream `retry/2` vs `rerun/2`; engine has 1 `Durable.retry` caller |
+| **retry bounded** (resume_edge_cases) | fail: upstream returned `{:ok, _}` where we expect `:retry_limit_reached` | **real gap → carry the bound in the engine** (no unbounded retry from operators) |
+| retry already queued returns same receipt (resume_edge_cases) | fail: `{:error, :not_failed}` | semantics differ but still idempotent (no second run) → adopt upstream; engine maps `:not_failed` |
+| **provide_input wakes poller, non-inline** (wait) | fail: assert_eventually timed out | **verify**: likely harness (CommitWaker needs queues on) or a real wake gap → rewrite on upstream test helpers |
+| **child callback failure removes the child** (orchestration) | fail: parent not `:completed` | **verify**: host-registration gate (Lightforge `b58d7c3`) not upstream → likely carry |
+| inline child completion before parent wait; dynamic string refs (orchestration ×2) | fail: reads our `context["__children"]` internals | test reads internals → rewrite against upstream child links (`list_children`) before judging |
+| already-waiting workflow not re-executed (wait) | fail: `:superseded` vs `:not_pending` | covered (no re-execution); error atom differs → engine maps it |
+| `on_timeout: :fail` records mode; event timeout fails run (wait ×2) | fail: no `on_timeout` field; internal `do_check_timeouts/1` shape | test uses internals → rewrite on upstream wait-group `on_timeout: :fail`; carry column only if behaviour missing |
+| concurrent identical starts admit one (integration/concurrency) | fail: `Storage.Dialect` absent | expected: admission moves to the engine on upstream `:key` (§2/§4) |
+
+Carry list after gap 2: SQLite dialect layer, `step_executions.session_id`, `pending_waits`, **context
+persisted on step failure**, **bounded retry** (engine), plus whatever the 4 **verify** rows prove after their tests
+are rewritten against upstream APIs.
