@@ -128,7 +128,7 @@ Method: each Lightforge-added test, from June base `a37f6c5` to `lightforge-main
 | event resume wakes the queue (wait) | pass | covered, drop ours |
 | atom/tuple/binary errors normalized (error_normalization ×3) | pass | covered, drop ours |
 | `Context.input/0` readable in steps (context_input) | pass | covered, drop ours |
-| **context written before a step error is persisted** (error_normalization) | fail: `context["failure_evidence"]` nil | **real gap → carry** (Phoenix review/failure evidence relies on it) |
+| **context written before a step error is persisted** (error_normalization) | fail: `context["failure_evidence"]` nil | **real gap → carry** |
 | `pending_waits/1` ×2 (wait) | fail: undefined | **carry** in engine (§4) |
 | **retry re-executes only the failed step** (resume_edge_cases) | fail: step2 never re-ran | **real gap or semantics change → verify** against upstream `retry/2` vs `rerun/2`; engine has 1 `Durable.retry` caller |
 | **retry bounded** (resume_edge_cases) | fail: upstream returned `{:ok, _}` where we expect `:retry_limit_reached` | **real gap → carry the bound in the engine** (no unbounded retry from operators) |
