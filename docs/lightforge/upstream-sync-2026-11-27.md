@@ -22,11 +22,11 @@ Consequence of the pins: **admission (`idempotency_key`) is deployed nowhere** (
 
 | Lightforge feature | Upstream 2.2.0 | Decision |
 |---|---|---|
-| Idempotent admission: `idempotency_key`, fingerprint, unique index (5fd99ac, 6fdf1dc, c34a7e5) | `:key`, `on_duplicate`, `key_scope`, `reuse:`, `return: :details`, `holds_key` index | **Drop ours, adopt upstream.** Not deployed (above) → no data migration. Engine #47 rewritten on `:key`/`key_scope` |
+| Idempotent admission: `idempotency_key`, fingerprint, unique index (5fd99ac, 6fdf1dc, c34a7e5) | `:key`, `on_duplicate`, `key_scope`, `reuse:`, `return: :details`, `holds_key` index | **Adopt upstream `:key` as the storage mechanism; keep #47's semantics in the engine.** Upstream `key_scope` is workflow-definition scope, not per-start org scope, and `:use_existing` does not reject a reused key with changed input. So: upstream `key:` = the existing org + workflow + caller-key digest; start with `return: :details` and resolve the duplicate path by holder identity; compare a persisted canonical request fingerprint so changed input still returns `:idempotency_conflict`. Never deployed → no data migration |
 | `retry_count`, `last_retried_at` + `Durable.retry` in place | `retry/2`, `rerun`, `retried_at`, `trigger: :rerun` | **Adopt upstream.** Leave the two Phoenix columns in place (unused); stop writing them |
 | `step_executions.session_id` (+ index) | absent | **Carry.** Phoenix `Aegis.Workflows` reads `durable.step_executions` |
 | `pending_events.on_timeout` (`:resume`/`:fail`) | wait-group `on_timeout: :fail`, `timeout_value` semantics; no column | **Verify** engine approval/event waits against upstream semantics; carry the column only if a behaviour is missing |
-| Pending-event uniqueness hardening (v20260723) | `:buffered` status + event buffering (send before wait) | **Verify**; likely superseded. Keep the applied index unless it conflicts with buffered events (two rows per workflow+event) — **high-risk check** |
+| Pending-event uniqueness hardening (v20260723) | `:buffered` status + event buffering (send before wait) | **Adopt upstream index; retain it on upgrade.** Upstream 2.2 creates the same partial uniqueness invariant (`status = 'pending' AND wait_type = 'single'`); `:buffered` rows are excluded, so no conflict. Tests: send-before-wait, and an upgrade DB that already has our v20260723 index |
 | `Durable.pending_waits/1` | removed from public API | Move into engine (query `pending_events`/`pending_inputs`), or carry a 10-line fn |
 | Wake poller on start/resume; context persisted on step failure / before wait; normalized errors; `Atom.to_string` module storage; child start gated on host registration | upstream: CommitWaker, attempt fencing, persisted engine_state; module stored as string | **Verify each by test** (our tests replayed on upstream); drop if green |
 | SQLite: `Storage.Dialect`, `Migration.Dialect`, `Queue.Adapters.SQLite`, dialect edits in old migrations | absent | **Carry — required (D-1 resolved 2026-11-27: used by connect-phoenix).** Largest carry. Upstream Postgres-specific surface grew since June: `fragment(` 5→80, advisory locks 0→6, `text[]`/`ANY(` 0→6 (tags, key_scope), jsonb 8→25, `ON CONFLICT` 2→6, LISTEN/NOTIFY CommitWaker, `@schema_prefix "durable"` hardcoded in 10 schemas (we need the compile-time `schema_prefix: nil`). Each needs a Dialect path, on every sync |
@@ -46,6 +46,9 @@ adapters as the sync gate.
      upstream `ad60324` with `durable/` = our tree. Merge base for later merges = upstream history.
    - `git merge upstream/main` → resolve (28 files in the trial; executor.ex 23 hunks).
    - every later sync is `git merge upstream/main`. No projection, no rewritten history.
+   - **Enforce downstream-only:** local `upstream` remote gets `pushurl = DISABLED`; protect fork
+     `main` (mirror) and `lightforge-main`; the mirror reset is a lease-guarded push tied to the
+     recorded old fork-main SHA `701c3c6`, run only after the backup branch is verified on the remote.
 4. Consumers add `sparse: "durable"`: Phoenix ×3 apps (`aegis_platform`, `aegis_company`,
    `aegis_web` mix.exs) and engine `durable_dep/0`. Pin by `ref:` (not `branch:`) so lock and
    branch can't drift apart again (the 86aa946 problem).
@@ -55,11 +58,13 @@ adapters as the sync gate.
 
 | Area | Change |
 |---|---|
-| **Postgres DDL** | Engine hand-writes the `durable` schema (`AegisDurableEngine.Migration.up_postgres`) and doesn't use Durable's migrator. Port upstream's 11 migrations (v20261016 operator controls/nodes, deadlines+history/activity, workflow keys, schedule keys+tags, claim index, ready order+schedule source, root_workflow_id, engine_state, kept-lock index, node clock skew, key scopes) as idempotent `add_*` helpers + update `up_postgres` for fresh installs. **Biggest engine item.** Index builds on `workflow_executions` block inserts → `CONCURRENTLY` in Phoenix migrations |
+| **Durable migration ledger** | Engine Postgres DDL records only the host Ecto migration in `public.schema_migrations`; 2.2 NodeRegistry checks Durable's schema-local migration ledger. The port must create and seed that ledger with every version the hand-written DDL covers (or provide an equivalent explicit compatibility check); otherwise schema verification is silently lost |
+| **Postgres DDL** | Engine hand-writes the `durable` schema (`AegisDurableEngine.Migration.up_postgres`) and doesn't use Durable's migrator. Port upstream's 11 migrations (v20261016 operator controls/nodes, deadlines+history/activity, workflow keys, schedule keys+tags, claim index, ready order+schedule source, root_workflow_id, engine_state, kept-lock index, node clock skew, key scopes) as idempotent `add_*` helpers + update `up_postgres` for fresh installs. **Biggest engine item.** Index builds on `workflow_executions` block inserts → `CONCURRENTLY`, which must run outside the Ecto DDL transaction (`@disable_ddl_transaction true` + `@disable_migration_lock true`, separate migration) |
 | SQLite path | `Migration.SQLite` calls `Durable.Migration.up/0`. Breaks if D-1 drops SQLite; otherwise needs dialect for all new migrations |
-| Admission (#47) | Rewrite `scoped_idempotency_key` → `key:` + `key_scope:` (org-scoped), map `{:error, {:key_taken, id}}` / `:key_contended`; drop `add_idempotent_workflow_start` (never shipped to Phoenix) |
+| Admission (#47) | Keep `scoped_idempotency_key` (org + workflow + caller-key digest) and pass it as upstream `key:`; `return: :details` + holder lookup for duplicates; persisted canonical fingerprint compared on duplicate → `:idempotency_conflict` on changed input; map `:key_contended`. Replace the `idempotency_key` columns/index with upstream key columns + a fingerprint column (never shipped to Phoenix). Tests: concurrent same-input, concurrent different-input, cross-org same caller key |
 | `pending_waits/2` | Reimplement (§2) |
-| 2.0 breaking | read fns return `{:ok,_}`/`{:error,_}` + `!` twins; parallel blocks must be named (engine `helpers.ex` emits `parallel do`); **failed run no longer auto-compensates** — engine has 21 `compensate` references; callers must call `Durable.rollback/2` explicitly where they relied on it |
+| 2.0 breaking | read fns return `{:ok,_}`/`{:error,_}` + `!` twins; parallel blocks must be named (engine `helpers.ex` emits `parallel do`) |
+| Compensation | Two separate paths. **Native Durable DSL compensation** is now explicit (`Durable.rollback/2`): audit the actual native-DSL workflow modules (engine, Phoenix, connect-phoenix) that declare `compensate:` and rely on auto-rollback. **Engine declarative runner** runs its own compensation stack and is unaffected by the 2.0 change. The 21 engine `compensate` references are not all `rollback/2` callers |
 | New status values | step `:cancelled`, `:snoozed`; event `:buffered` — check engine pattern matches |
 | Tests | engine suite on its own Postgres (and SQLite if kept) at new pin; receipt per repo rules |
 
@@ -70,10 +75,12 @@ adapters as the sync gate.
 | Deps | 3 mix.exs: `sparse: "durable"`, `ref:` pin; lock bump of durable + engine **together** (the engine jumps 64e18c3 → post-#48 at the same time: SQLite #46 + admission #47 + this port) |
 | Migrations | new host migration calling the engine's upgrade helpers; update `apps/aegis_core/priv/repo/baseline/schema.sql` (durable.* tables + new `nodes`, activity/history tables) |
 | Raw SQL on `durable.*` | `Aegis.Workflows` (step_executions ×2), `RequirementWorkflow` (workflow_executions), `WorkflowScheduleFireReconciler`, `AegisWeb.CompanyWork.WorkflowParts` (status mapping), `E2eController` INSERT. New NOT NULL columns all have defaults → INSERT ok; status mappers need the new step/event values |
-| New runtime processes | NodeRegistry (heartbeat rows per node), Sampler, CommitWaker, Drainer (`shutdown_grace_period` 15s — check against the release's stop timeout and the 2-node Apple cluster/Horde handoff); Pruner off unless `prune:` set — keep off |
-| Config | `config :durable` keys: `:queue_enabled` still valid; review `node_id`, `shutdown_grace_period`, queue `poll_interval` |
+| Shutdown | Drainer = `shutdown_grace_period` 15 s + 5 s hand-back = 20 s. Fly today: `fly.staging.toml` `kill_timeout = "10s"`, other Phoenix Fly configs default 5 s → set and prove a platform kill timeout above 20 s (e.g. 30 s) on every Fly config plus the release stop timeout; Apple cluster stop timeout likewise. Gate: two-node drain/hand-off test |
+| New runtime processes | NodeRegistry (heartbeat rows per node), Sampler, CommitWaker, Drainer; Pruner off unless `prune:` set — keep off |
+| Config / node identity | `:queue_enabled` still valid. `node_id` is derived, not a config key → verify unique release node names across both nodes and Fly machines, and stale-node cleanup after replaced machines |
 | Deps added by upstream | `opentelemetry_api`, `telemetry_metrics` (runtime), `stream_data`/`ex_slop` (dev/test) — Phoenix already has OTel; check version solve |
-| Live DBs | dev cluster (Apple), Fly aegis-company, e2e harness images: migrations are additive (new columns w/ defaults, new tables, new indexes). Run index builds `CONCURRENTLY`; rollback = drop added objects |
+| Live DBs | dev cluster (Apple), Fly aegis-company, e2e harness images. Schema changes are additive (new columns w/ defaults, new tables, new indexes) |
+| **Mixed-version rollout** | Old and new queue workers must never overlap on one DB: (1) expand schema first (additive migration + ledger seed, `CONCURRENTLY` indexes); (2) drain old workers (`queue_enabled` off / stop); (3) deploy one exact Durable + engine set to both nodes; (4) enable queues. **Rollback is not "drop added objects"**: once 2.2 writes new statuses / `engine_state` / key columns, going back needs a data downgrade or a forward fix — decide which before rollout |
 | E2E | workflow scenarios (RequirementWorkflow, rerun API, scenario 67) are the acceptance gate — Hugo/owner only |
 
 ## 5b. Impact — aegis-connect-phoenix (SQLite consumer)
@@ -92,17 +99,19 @@ adapters as the sync gate.
 
 1. ~~D-1 SQLite~~ **Resolved: keep** (connect-phoenix). Open: engine `feat/sqlite` (dd4ade1) vs engine main — confirm connect-phoenix's 3-file difference is merged or intended before re-pinning.
 2. Which current Lightforge behaviours does upstream 2.2.0 already cover? Answer by running our durable tests (`idempotent_start`, `wait`, `concurrency`, context/retry/timeout suites) against upstream 2.2.0 + session_id → failing tests = real carry list.
-3. Pending-event uniqueness index vs upstream `:buffered` events — confirm no duplicate-row conflict on a DB that already has the index.
-4. Engine compensation reliance under 2.0 "failed run is left as it failed".
-5. Drainer/NodeRegistry behaviour on the 2-node dev cluster and Fly (node ids, clock-skew table).
+3. ~~Pending-event index~~ resolved (Hugo): upstream has the same partial invariant; adopt and retain.
+4. Native-DSL `compensate:` consumers relying on auto-rollback (audit; engine declarative runner excluded).
+5. Two-node drain/hand-off at a kill timeout above 20 s; unique node names; stale-node cleanup.
 6. Phoenix lock drift: fix now, independent of the sync — pin `ref: 86aa946…` explicitly so a deps update can't silently jump lines.
+7. Durable migration ledger seeding for engine-owned Postgres DDL.
+8. Rollback strategy after 2.2 writes data: data downgrade vs forward fix.
 
 ## 7. Order of work
 
 1. (now, small) Phoenix: pin durable by `ref` (gap 6). Backups + fork `main` mirror reset.
-2. Gap 2 test run → final carry list. D-1 decision.
+2. Gap 2 test run → final carry list. Downstream-only guards (push URL, branch protection).
 3. lightforge-main: graft + merge upstream (monorepo layout), carry set only; durable tests green.
 4. Engine: DDL port, admission on `:key`, 2.0 API, `pending_waits`; engine tests green.
 5. Phoenix: deps + host migration + baseline + raw-SQL status fixes; `mix test`; then Hugo runs workflow e2e.
 5b. connect-phoenix: pins + `sparse`; suite + flows harness on SQLite.
-6. Rollout: dev cluster → Fly; `CONCURRENTLY` indexes.
+6. Rollout per the mixed-version contract (§5): expand → drain → deploy one set → enable; dev cluster first, then Fly with kill timeout ≥ 30 s.
