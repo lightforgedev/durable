@@ -12,10 +12,10 @@ permanent carry set + a sync that repeats as a plain `git merge upstream/main`.
 | fork `lightforge-main` | orphan history. `e600e57..a37f6c5` = rewritten projection; `a37f6c5` tree **==** upstream `ad60324:durable/` (2026-06-24). `b7114f7` = Lightforge package tree. +5 admission commits → `c34a7e5` |
 | upstream drift since ad60324 | 448 commits, 311 touch `durable/` (1.3 → 2.2.0, includes **2.0.0 breaking**) |
 | aegis-durable-engine main | `7c3e5cc`, pins durable `c34a7e5` |
+| **connect-phoenix main** | durable **`d0c24e7`** (`feat/sqlite`; tree == lightforge-main `b7114f7` except ci.yml — SQLite, no admission), engine **`dd4ade1`** (engine `feat/sqlite`; engine main differs by 3 lib files). SQLite-only: `config :durable, schema_prefix: nil` (compile-time), WAL, `:immediate` transactions, 6+ queues at 100–500 ms poll |
 | **Phoenix main mix.lock** | durable **`86aa946`** (only on `backup/lightforge-main-pre-upstream-rebase-20261006` and `feat/sqlite`, not on `lightforge-main`); engine **`64e18c3`** (#45 — before SQLite #46, admission #47/#48) |
 
-Consequence of the Phoenix pin: **admission (`idempotency_key`) and SQLite are not deployed** anywhere
-Phoenix runs. Phoenix's `baseline/schema.sql` has no `idempotency_key` column. A bare
+Consequence of the pins: **admission (`idempotency_key`) is deployed nowhere** (Phoenix and connect-phoenix both predate it). **SQLite is live in connect-phoenix** (Connect host `$AEGIS_CONNECT_HOME/workflows.sqlite3`), not in Phoenix. Phoenix's `baseline/schema.sql` has no `idempotency_key` column. A bare
 `mix deps.update durable` in Phoenix today jumps from 86aa946 to the orphan c34a7e5 line.
 
 ## 2. Our delta vs upstream 2.2.0 — keep / adopt-upstream / verify
@@ -29,11 +29,13 @@ Phoenix runs. Phoenix's `baseline/schema.sql` has no `idempotency_key` column. A
 | Pending-event uniqueness hardening (v20260723) | `:buffered` status + event buffering (send before wait) | **Verify**; likely superseded. Keep the applied index unless it conflicts with buffered events (two rows per workflow+event) — **high-risk check** |
 | `Durable.pending_waits/1` | removed from public API | Move into engine (query `pending_events`/`pending_inputs`), or carry a 10-line fn |
 | Wake poller on start/resume; context persisted on step failure / before wait; normalized errors; `Atom.to_string` module storage; child start gated on host registration | upstream: CommitWaker, attempt fencing, persisted engine_state; module stored as string | **Verify each by test** (our tests replayed on upstream); drop if green |
-| SQLite: `Storage.Dialect`, `Migration.Dialect`, `Queue.Adapters.SQLite`, dialect edits in old migrations | absent | **Owner decision (D-1).** Largest carry: every upstream query/migration since June (claims, key holders, `FOR UPDATE`, claim/kept-lock indexes, node registry) needs a SQLite path, again on every sync |
+| SQLite: `Storage.Dialect`, `Migration.Dialect`, `Queue.Adapters.SQLite`, dialect edits in old migrations | absent | **Carry — required (D-1 resolved 2026-11-27: used by connect-phoenix).** Largest carry. Upstream Postgres-specific surface grew since June: `fragment(` 5→80, advisory locks 0→6, `text[]`/`ANY(` 0→6 (tags, key_scope), jsonb 8→25, `ON CONFLICT` 2→6, LISTEN/NOTIFY CommitWaker, `@schema_prefix "durable"` hardcoded in 10 schemas (we need the compile-time `schema_prefix: nil`). Each needs a Dialect path, on every sync |
 | Elixir 1.20/OTP 29 type fixes | upstream `~> 1.15`, warnings-clean under credo strict | Re-run `--warnings-as-errors` on 1.20 after merge; keep only fixes still needed |
 
-Target carry set if D-1 = drop SQLite: **session_id + pending_waits + whatever §2 verification
-proves missing.** That's a few hundred lines rather than 15k.
+Carry set: **SQLite dialect layer (incl. compile-time schema prefix) + session_id + pending_waits + whatever §2
+verification proves missing.** To keep SQLite cheap across syncs: isolate every dialect branch behind
+`Durable.Storage.Dialect` (no inline `if sqlite?` in executor/queue), and run the full durable suite on both
+adapters as the sync gate.
 
 ## 3. Branch strategy (replaces the projection approach)
 
@@ -74,9 +76,21 @@ proves missing.** That's a few hundred lines rather than 15k.
 | Live DBs | dev cluster (Apple), Fly aegis-company, e2e harness images: migrations are additive (new columns w/ defaults, new tables, new indexes). Run index builds `CONCURRENTLY`; rollback = drop added objects |
 | E2E | workflow scenarios (RequirementWorkflow, rerun API, scenario 67) are the acceptance gate — Hugo/owner only |
 
+## 5b. Impact — aegis-connect-phoenix (SQLite consumer)
+
+| Area | Change |
+|---|---|
+| Deps | `@durable_rev` / `@durable_engine_rev` in mix.exs → new lightforge-main / engine SHAs; `durable_dep/4` git branch gets `sparse: "durable"` |
+| Schema | SQLite migrations run through `Durable.Migration.up/0` via engine `Migration.SQLite` → all 11 upstream migrations must have SQLite forms (arrays → JSON text, partial/unique indexes, no `CONCURRENTLY`, no schemas) |
+| Concurrency | Upstream claims use `FOR UPDATE SKIP LOCKED` + advisory locks; SQLite path relies on `:immediate` write lock + `busy_timeout 5000`. Re-check claim/kept-lock/key-holder logic under the single-writer model and short poll intervals (signal_flows 100 ms) |
+| Wake | CommitWaker uses Postgres LISTEN/NOTIFY → SQLite needs the in-process wake (single node) |
+| Multi-node features | NodeRegistry, clock skew, Drainer: single local node — must start cleanly and not assume Postgres |
+| 2.0 breaking | Connect workflows (`Connect.Panels.Refresh`, `Connect.Work.WaiverWait`/`RolloutWait`, signal flows): read-fn tuples, named parallel blocks, explicit rollback |
+| Tests | connect-phoenix suite + its flows harness at the new pins |
+
 ## 6. Gaps to close before resolving the merge
 
-1. **D-1 SQLite:** keep (permanent heavy carry) or drop (engine #46 desktop hosts lose SQLite).
+1. ~~D-1 SQLite~~ **Resolved: keep** (connect-phoenix). Open: engine `feat/sqlite` (dd4ade1) vs engine main — confirm connect-phoenix's 3-file difference is merged or intended before re-pinning.
 2. Which current Lightforge behaviours does upstream 2.2.0 already cover? Answer by running our durable tests (`idempotent_start`, `wait`, `concurrency`, context/retry/timeout suites) against upstream 2.2.0 + session_id → failing tests = real carry list.
 3. Pending-event uniqueness index vs upstream `:buffered` events — confirm no duplicate-row conflict on a DB that already has the index.
 4. Engine compensation reliance under 2.0 "failed run is left as it failed".
@@ -90,4 +104,5 @@ proves missing.** That's a few hundred lines rather than 15k.
 3. lightforge-main: graft + merge upstream (monorepo layout), carry set only; durable tests green.
 4. Engine: DDL port, admission on `:key`, 2.0 API, `pending_waits`; engine tests green.
 5. Phoenix: deps + host migration + baseline + raw-SQL status fixes; `mix test`; then Hugo runs workflow e2e.
+5b. connect-phoenix: pins + `sparse`; suite + flows harness on SQLite.
 6. Rollout: dev cluster → Fly; `CONCURRENTLY` indexes.
