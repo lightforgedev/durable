@@ -2,21 +2,33 @@ defmodule DurableDashboard.Components.Workflow.IoTab do
   @moduledoc """
   I/O tab — shows the workflow's input payload and the accumulated context as
   pretty-printed JSON. Side-by-side on wide screens, stacked on narrow.
+
+  The engine's own bookkeeping (child runs, parallel results) is folded away
+  under the run's own context. It has a column of its own; an engine from
+  before the column kept it in the context, under keys starting with `__`.
   """
 
   use Phoenix.Component
 
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Components.Workflow.ChildrenTab
 
   attr :workflow, :map, required: true
 
   def io_tab(assigns) do
+    {own, internal} = ChildrenTab.split(assigns.workflow)
+    assigns = assign(assigns, own: own, internal: internal)
+
     ~H"""
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Core.card padding="none">
         <:title>Input</:title>
         <:action>
-          <span class="text-[11px] text-muted-foreground font-mono">
+          <span
+            class="text-[11px] text-muted-foreground font-mono"
+            data-tip-title="Input size"
+            data-tip="What the run was started with, as JSON"
+          >
             {byte_size_kb(@workflow.input)}
           </span>
         </:action>
@@ -27,12 +39,26 @@ defmodule DurableDashboard.Components.Workflow.IoTab do
       <Core.card padding="none">
         <:title>Context</:title>
         <:action>
-          <span class="text-[11px] text-muted-foreground font-mono">
+          <span
+            class="text-[11px] text-muted-foreground font-mono"
+            data-tip-title="Context size"
+            data-tip="What steps stored with put_context, as JSON · saved after every step"
+          >
             {byte_size_kb(@workflow.context)}
           </span>
         </:action>
 
-        <.json_block payload={@workflow.context} empty="No context yet" />
+        <.json_block payload={@own} empty="No context yet" />
+        <details :if={@internal != %{}} class="group/internal border-t border-border">
+          <summary
+            class="flex cursor-pointer list-none items-center gap-1.5 px-4 py-2 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden"
+            data-tip="Keys Durable keeps for itself — child runs, parallel results · not written by your steps"
+          >
+            <Core.icon name="chevron-right" class="size-3 transition-transform group-open/internal:rotate-90" />
+            Engine bookkeeping · {map_size(@internal)} {if map_size(@internal) == 1, do: "key", else: "keys"}
+          </summary>
+          <Core.json value={@internal} bare class="max-h-[400px] bg-muted/20 px-4 py-3" />
+        </details>
       </Core.card>
     </div>
     """

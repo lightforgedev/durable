@@ -27,6 +27,7 @@ defmodule Durable.Queue.Manager do
 
   alias Durable.Config
   alias Durable.Queue.Adapter
+  alias Durable.Queue.Drainer
   alias Durable.Queue.Poller
   alias Durable.Queue.StaleJobRecovery
 
@@ -62,17 +63,6 @@ defmodule Durable.Queue.Manager do
   end
 
   @doc """
-  Wakes a queue poller without changing pause/drain state.
-  """
-  @spec wake(atom(), atom() | String.t()) :: :ok
-  def wake(durable_name \\ Durable, queue_name) do
-    queue_name
-    |> normalize_queue_name()
-    |> poller_name(durable_name)
-    |> Poller.wake()
-  end
-
-  @doc """
   Drains a queue, waiting for active jobs to complete.
   """
   @spec drain(atom(), atom() | String.t(), timeout()) :: :ok | {:error, :timeout}
@@ -103,7 +93,7 @@ defmodule Durable.Queue.Manager do
 
     queue_name
     |> normalize_queue_name()
-    |> then(&Adapter.for_config(config).get_stats(config, &1))
+    |> then(&Adapter.default_adapter().get_stats(config, &1))
   end
 
   @doc """
@@ -116,10 +106,42 @@ defmodule Durable.Queue.Manager do
     |> Enum.map(&to_string/1)
   end
 
+  @doc false
+  # This node's workers, on every queue. A queue whose supervisor is down has
+  # none to give.
+  @spec workers(Config.t()) :: [pid()]
+  def workers(%Config{} = config) do
+    for queue <- Map.keys(config.queues),
+        {_id, pid, _type, _modules} <-
+          children(worker_supervisor_name(to_string(queue), config.name)),
+        is_pid(pid),
+        do: pid
+  end
+
+  @doc false
+  # This node's pollers, on every queue.
+  @spec pollers(Config.t()) :: [pid()]
+  def pollers(%Config{} = config) do
+    for queue <- Map.keys(config.queues),
+        pid = Process.whereis(poller_name(to_string(queue), config.name)),
+        is_pid(pid),
+        do: pid
+  end
+
+  defp children(supervisor) do
+    DynamicSupervisor.which_children(supervisor)
+  catch
+    :exit, _down -> []
+  end
+
   # Supervisor callbacks
 
   @impl true
   def init(%Config{} = config) do
+    # The manager that stopped before this one left the node stopping
+    # (Drainer.terminate/2). A manager that starts is a node that claims.
+    Drainer.reset(config.name)
+
     children =
       [
         # Registry for looking up pollers by name
@@ -127,7 +149,8 @@ defmodule Durable.Queue.Manager do
 
         # Stale job recovery
         {StaleJobRecovery, config: config}
-      ] ++ build_queue_children(config)
+        # Last, so it's the first child stopped. See `Durable.Queue.Drainer`.
+      ] ++ build_queue_children(config) ++ [{Drainer, config}]
 
     Logger.info(
       "Queue manager #{inspect(config.name)} starting with queues: #{inspect(Map.keys(config.queues))}"
@@ -144,12 +167,8 @@ defmodule Durable.Queue.Manager do
       worker_sup_name = worker_supervisor_name(queue_str, config.name)
 
       [
-        # DynamicSupervisor for workers. Ids are per queue: with the default
-        # module ids a second queue was a duplicate child spec.
-        Supervisor.child_spec(
-          {DynamicSupervisor, name: worker_sup_name, strategy: :one_for_one},
-          id: {DynamicSupervisor, queue_str}
-        ),
+        # DynamicSupervisor for workers
+        {DynamicSupervisor, name: worker_sup_name, strategy: :one_for_one},
 
         # Poller for this queue
         Supervisor.child_spec(
@@ -184,7 +203,7 @@ defmodule Durable.Queue.Manager do
   end
 
   defp poller_name(queue_name, durable_name) do
-    Module.concat([durable_name, Queue, Poller, camelize(queue_name)])
+    Module.concat([durable_name, Queue, :Poller, camelize(queue_name)])
   end
 
   defp camelize(string) do

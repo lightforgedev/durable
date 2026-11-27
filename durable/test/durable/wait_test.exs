@@ -17,7 +17,6 @@ defmodule Durable.WaitTest do
   alias Durable.Executor
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
   alias Durable.Wait
-  alias Durable.Wait.TimeoutWorker
 
   import Ecto.Query
 
@@ -51,7 +50,7 @@ defmodule Durable.WaitTest do
     test "sets scheduled_at to correct future time" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(SleepTestWorkflow, %{})
 
@@ -117,7 +116,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :waiting
       force_sleep_elapsed!(repo, execution.id)
 
-      adapter = Adapter.for_config(config)
+      adapter = Adapter.default_adapter()
       {:ok, woken} = adapter.wake_sleeping_workflows(config, 100)
       assert woken == 1
 
@@ -125,7 +124,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :pending
       assert execution.locked_by == nil
       assert execution.locked_at == nil
-      assert execution.context["__sleep_satisfied__"] == "sleep_step"
+      assert execution.engine_state["__sleep_satisfied__"] == "sleep_step"
     end
 
     test "resuming after wake completes the workflow past the sleep" do
@@ -136,7 +135,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :waiting
       force_sleep_elapsed!(repo, execution.id)
 
-      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
 
       # Drive the resumed workflow synchronously, the way the queue
       # poller would after fetch_jobs claims the now-:pending row.
@@ -156,7 +155,7 @@ defmodule Durable.WaitTest do
       {:ok, execution} = create_and_execute_workflow(ShortScheduleAtWorkflow, %{})
       assert execution.status == :waiting
 
-      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
       Durable.Executor.execute_workflow(execution.id, config)
 
       execution = repo.get!(WorkflowExecution, execution.id)
@@ -172,7 +171,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :waiting
       force_sleep_elapsed!(repo, execution.id)
 
-      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
       Durable.Executor.execute_workflow(execution.id, config)
       execution = repo.get!(WorkflowExecution, execution.id)
       # Suspended again at the second sleep. The first sleep's marker was
@@ -180,10 +179,10 @@ defmodule Durable.WaitTest do
       # linger into the second suspension.
       assert execution.status == :waiting
       assert execution.context["first_done"] == true
-      assert execution.context["__sleep_satisfied__"] == nil
+      assert execution.engine_state["__sleep_satisfied__"] == nil
 
       force_sleep_elapsed!(repo, execution.id)
-      Adapter.for_config(config).wake_sleeping_workflows(config, 100)
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
       Durable.Executor.execute_workflow(execution.id, config)
 
       execution = repo.get!(WorkflowExecution, execution.id)
@@ -193,12 +192,12 @@ defmodule Durable.WaitTest do
       # removed, so the finished workflow carries no `__sleep_satisfied__`.
       # (A lingering marker would make a loop/`each` re-entry of the same
       # sleep step skip its sleep.)
-      assert execution.context["__sleep_satisfied__"] == nil
+      assert execution.engine_state["__sleep_satisfied__"] == nil
     end
 
     test "the sweep is a no-op when no rows are eligible" do
       config = Config.get(Durable)
-      adapter = Adapter.for_config(config)
+      adapter = Adapter.default_adapter()
 
       assert {:ok, 0} = adapter.wake_sleeping_workflows(config, 100)
     end
@@ -211,7 +210,7 @@ defmodule Durable.WaitTest do
       # duplicate PendingEvent rows.
       config = Config.get(Durable)
       repo = config.repo
-      adapter = Adapter.for_config(config)
+      adapter = Adapter.default_adapter()
 
       {:ok, execution} = create_and_execute_workflow(SleepThenEventWorkflow, %{})
       assert execution.status == :waiting
@@ -300,33 +299,10 @@ defmodule Durable.WaitTest do
       assert pending.wait_type == :single
     end
 
-    test "does not re-execute a workflow that is already waiting" do
-      config = Config.get(Durable)
-      repo = config.repo
-
-      {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
-
-      # A second worker can load the same run just before the first worker
-      # persists its wait. Re-executing from :waiting used to re-enter the
-      # step and create a duplicate pending event for the same logical event.
-      assert {:error, :not_pending} = Executor.execute_workflow(execution.id, config)
-
-      assert 1 ==
-               repo.aggregate(
-                 from(p in PendingEvent,
-                   where:
-                     p.workflow_id == ^execution.id and
-                       p.event_name == "payment_confirmed" and
-                       p.status == :pending
-                 ),
-                 :count
-               )
-    end
-
     test "with timeout option sets timeout_at" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
 
@@ -336,16 +312,6 @@ defmodule Durable.WaitTest do
       # Timeout should be ~1 hour in the future (hours(1))
       diff_ms = DateTime.diff(pending.timeout_at, before, :millisecond)
       assert diff_ms >= 3_500_000 and diff_ms <= 3_700_000
-    end
-
-    test "on_timeout: :fail records the timeout mode" do
-      config = Config.get(Durable)
-      repo = config.repo
-
-      {:ok, execution} = create_and_execute_workflow(FailOnTimeoutEventWorkflow, %{})
-
-      pending = get_pending_event(repo, execution.id, "final_checks.completed")
-      assert pending.on_timeout == :fail
     end
 
     test "resumes when event is sent via send_event/4" do
@@ -368,29 +334,6 @@ defmodule Durable.WaitTest do
       execution = repo.get!(WorkflowExecution, execution.id)
       assert execution.status == :completed
       assert execution.context["result"] == %{"amount" => 99.99}
-    end
-
-    @tag :supervised
-    test "wakes the queue after an event resumes a workflow" do
-      start_supervised_durable!()
-
-      config = Config.get(Durable)
-      repo = config.repo
-
-      {:ok, workflow_id} = Durable.start(EventWaitTestWorkflow, %{})
-
-      assert_eventually(fn ->
-        repo.get!(WorkflowExecution, workflow_id).status == :waiting
-      end)
-
-      assert :ok = Wait.send_event(workflow_id, "payment_confirmed", %{"amount" => 99.99})
-
-      assert_eventually(fn ->
-        case repo.get!(WorkflowExecution, workflow_id) do
-          %{status: :completed, context: %{"result" => %{"amount" => 99.99}}} -> true
-          _ -> false
-        end
-      end)
     end
   end
 
@@ -419,7 +362,7 @@ defmodule Durable.WaitTest do
       timeout_value = pending.timeout_value
       assert is_map(timeout_value)
       # Nested tuple flattened to a list inside the map
-      assert get_in(timeout_value, ["nested", "tag"]) == ["err", "boom"]
+      assert get_in(timeout_value, ["__value__", "nested", "tag"]) == ["err", "boom"]
     end
   end
 
@@ -603,50 +546,10 @@ defmodule Durable.WaitTest do
       assert execution.status == :completed
     end
 
-    test "provide_input wakes the queue poller for non-inline resume" do
-      durable_name = :provide_input_wake_test
-
-      start_supervised!(
-        {Durable,
-         repo: Durable.TestRepo,
-         name: durable_name,
-         queues: %{default: [concurrency: 1, poll_interval: 60_000]},
-         queue_enabled: true}
-      )
-
-      config = Config.get(durable_name)
-      repo = config.repo
-
-      {:ok, workflow_id} = Durable.start(InputWaitTestWorkflow, %{}, durable: durable_name)
-
-      assert_eventually(fn ->
-        repo.get!(WorkflowExecution, workflow_id).status == :waiting
-      end)
-
-      :ok =
-        Wait.provide_input(
-          workflow_id,
-          "manager_approval",
-          %{"decision" => "approved"},
-          durable: durable_name
-        )
-
-      assert_eventually(
-        fn ->
-          execution = repo.get!(WorkflowExecution, workflow_id)
-
-          execution.status == :completed and
-            execution.context["approval"] == %{"decision" => "approved"}
-        end,
-        2_000,
-        25
-      )
-    end
-
     test "with timeout option sets timeout_at" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
 
@@ -862,54 +765,12 @@ defmodule Durable.WaitTest do
   # TimeoutWorker Tests
   # ============================================================================
 
-  describe "event timeout failure" do
-    test "fails the waiting workflow instead of resuming it with a timeout value" do
-      config = Config.get(Durable)
-      repo = config.repo
-
-      {:ok, execution} = create_and_execute_workflow(FailOnTimeoutEventWorkflow, %{})
-      workflow_id = execution.id
-
-      pending = get_pending_event(repo, execution.id, "final_checks.completed")
-
-      pending
-      |> Ecto.Changeset.change(timeout_at: DateTime.add(DateTime.utc_now(), -1, :second))
-      |> repo.update!()
-
-      assert {:noreply, _state} = TimeoutWorker.handle_cast(:check_timeouts, %{config: config})
-
-      failed = repo.get!(WorkflowExecution, execution.id)
-      assert failed.status == :failed
-      assert failed.current_step == "wait_step"
-      assert failed.error["type"] == "event_timeout"
-      assert failed.error["event_name"] == "final_checks.completed"
-
-      pending = get_pending_event(repo, execution.id, "final_checks.completed")
-      assert pending.status == :timeout
-
-      assert {:ok, ^workflow_id} =
-               Executor.retry_workflow(workflow_id, durable: Durable, inline: true)
-
-      retried = repo.get!(WorkflowExecution, workflow_id)
-      assert retried.status == :waiting
-      assert retried.current_step == "wait_step"
-
-      assert [%{status: :pending}] =
-               repo.all(
-                 from(p in PendingEvent,
-                   where:
-                     p.workflow_id == ^workflow_id and
-                       p.event_name == "final_checks.completed" and
-                       p.status == :pending
-                 )
-               )
-
-      :ok = Wait.send_event(workflow_id, "final_checks.completed", %{"conclusion" => "success"})
-      {:ok, _} = Executor.execute_workflow(workflow_id, config)
-
-      assert %{status: :completed} = repo.get!(WorkflowExecution, workflow_id)
-    end
-  end
+  # Note: TimeoutWorker is not started when queue_enabled: false (test mode)
+  # These tests would require starting Durable with queue_enabled: true
+  # or manually starting the TimeoutWorker
+  #
+  # The TimeoutWorker functionality is tested indirectly through integration tests
+  # when the full queue system is running
 
   # ============================================================================
   # Time Helpers Tests
@@ -970,7 +831,7 @@ defmodule Durable.WaitTest do
     test "zero timeout sets timeout_at to essentially now" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(ZeroTimeoutEventWorkflow, %{})
 
@@ -1109,7 +970,7 @@ defmodule Durable.WaitTest do
     test "returns pending inputs with default filters" do
       {:ok, execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
 
-      inputs = Wait.list_pending_inputs()
+      inputs = Wait.list_pending_inputs!()
 
       assert inputs != []
       assert Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
@@ -1129,43 +990,12 @@ defmodule Durable.WaitTest do
       |> repo.update!()
 
       # Should not appear in pending list
-      inputs = Wait.list_pending_inputs(status: :pending)
+      inputs = Wait.list_pending_inputs!(status: :pending)
       refute Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
 
       # Should appear in completed list
-      inputs = Wait.list_pending_inputs(status: :completed)
+      inputs = Wait.list_pending_inputs!(status: :completed)
       assert Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
-    end
-  end
-
-  describe "pending_waits/2" do
-    test "returns every pending wait for one run and no waits from another run" do
-      config = Config.get(Durable)
-      {:ok, input_execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
-      {:ok, event_execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
-
-      %PendingEvent{}
-      |> PendingEvent.changeset(%{
-        workflow_id: input_execution.id,
-        event_name: "follow_up",
-        step_name: "manual_follow_up"
-      })
-      |> config.repo.insert!()
-
-      waits = Durable.pending_waits(input_execution.id)
-
-      assert length(waits) == 2
-      assert Enum.any?(waits, &match?(%{kind: :input, name: "manager_approval"}, &1))
-      assert Enum.any?(waits, &match?(%{kind: :event, name: "follow_up"}, &1))
-      assert Enum.all?(waits, &(&1.workflow_id == input_execution.id))
-
-      refute Enum.any?(waits, fn pending ->
-               pending.workflow_id == event_execution.id
-             end)
-    end
-
-    test "returns an empty list for an unknown run" do
-      assert Durable.pending_waits(Ecto.UUID.generate()) == []
     end
   end
 
@@ -1173,7 +1003,7 @@ defmodule Durable.WaitTest do
     test "returns pending events with default filters" do
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
 
-      events = Wait.list_pending_events()
+      events = Wait.list_pending_events!()
 
       assert events != []
       assert Enum.any?(events, fn e -> e.workflow_id == execution.id end)
@@ -1182,10 +1012,10 @@ defmodule Durable.WaitTest do
     test "filters by event_name" do
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
 
-      events = Wait.list_pending_events(event_name: "payment_confirmed")
+      events = Wait.list_pending_events!(event_name: "payment_confirmed")
       assert Enum.any?(events, fn e -> e.workflow_id == execution.id end)
 
-      events = Wait.list_pending_events(event_name: "other_event")
+      events = Wait.list_pending_events!(event_name: "other_event")
       refute Enum.any?(events, fn e -> e.workflow_id == execution.id end)
     end
   end
@@ -1348,18 +1178,18 @@ defmodule SleepTestWorkflow do
   use Durable.Wait
 
   workflow "sleep_test" do
-    step(:before_sleep, fn data ->
+    step :before_sleep, fn data ->
       {:ok, assign(data, :before, true)}
-    end)
+    end
 
-    step(:sleep_step, fn data ->
+    step :sleep_step, fn data ->
       sleep(seconds(30))
       {:ok, assign(data, :after_sleep, true)}
-    end)
+    end
 
-    step(:after_sleep, fn data ->
+    step :after_sleep, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -1369,14 +1199,14 @@ defmodule ScheduleAtTestWorkflow do
   use Durable.Wait
 
   workflow "schedule_at_test" do
-    step(:before_schedule, fn data ->
+    step :before_schedule, fn data ->
       {:ok, assign(data, :before, true)}
-    end)
+    end
 
-    step(:schedule_step, fn data ->
+    step :schedule_step, fn data ->
       schedule_at(next_business_day(hour: 9))
       {:ok, assign(data, :after_schedule, true)}
-    end)
+    end
   end
 end
 
@@ -1391,14 +1221,14 @@ defmodule ShortSleepWorkflow do
   use Durable.Wait
 
   workflow "short_sleep" do
-    step(:before_step, fn data -> {:ok, assign(data, :before, true)} end)
+    step :before_step, fn data -> {:ok, assign(data, :before, true)} end
 
-    step(:sleep_step, fn data ->
+    step :sleep_step, fn data ->
       sleep(1)
       {:ok, assign(data, :slept, true)}
-    end)
+    end
 
-    step(:after_step, fn data -> {:ok, assign(data, :completed, true)} end)
+    step :after_step, fn data -> {:ok, assign(data, :completed, true)} end
   end
 end
 
@@ -1408,10 +1238,10 @@ defmodule ShortScheduleAtWorkflow do
   use Durable.Wait
 
   workflow "short_schedule_at" do
-    step(:schedule_step, fn data ->
+    step :schedule_step, fn data ->
       schedule_at(DateTime.add(DateTime.utc_now(), -1, :second))
       {:ok, assign(data, :scheduled, true)}
-    end)
+    end
   end
 end
 
@@ -1421,15 +1251,15 @@ defmodule TwoSleepWorkflow do
   use Durable.Wait
 
   workflow "two_sleep" do
-    step(:first_sleep, fn data ->
+    step :first_sleep, fn data ->
       sleep(1)
       {:ok, assign(data, :first_done, true)}
-    end)
+    end
 
-    step(:second_sleep, fn data ->
+    step :second_sleep, fn data ->
       sleep(1)
       {:ok, assign(data, :second_done, true)}
-    end)
+    end
   end
 end
 
@@ -1443,15 +1273,15 @@ defmodule SleepThenEventWorkflow do
   # woke and completed, the row's stale scheduled_at made the SleepWaker
   # repeatedly flip the event-waiting row back to :pending.
   workflow "sleep_then_event" do
-    step(:nap, fn data ->
+    step :nap, fn data ->
       sleep(1)
       {:ok, assign(data, :napped, true)}
-    end)
+    end
 
-    step(:await, fn data ->
+    step :await, fn data ->
       result = wait_for_event("go")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1461,7 +1291,7 @@ defmodule EventWaitTestWorkflow do
   use Durable.Wait
 
   workflow "event_wait_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("payment_confirmed",
           timeout: hours(1),
@@ -1469,26 +1299,7 @@ defmodule EventWaitTestWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
-  end
-end
-
-defmodule FailOnTimeoutEventWorkflow do
-  use Durable
-  use Durable.Helpers
-  use Durable.Wait
-
-  workflow "fail_on_timeout_event" do
-    step(:wait_step, fn data ->
-      result =
-        wait_for_event("final_checks.completed",
-          timeout: hours(1),
-          timeout_value: %{"status" => "timed_out"},
-          on_timeout: :fail
-        )
-
-      {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1498,7 +1309,7 @@ defmodule WaitAnyTestWorkflow do
   use Durable.Wait
 
   workflow "wait_any_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       {event_name, payload} = wait_for_any(["success", "failure"])
 
       data =
@@ -1507,7 +1318,7 @@ defmodule WaitAnyTestWorkflow do
         |> assign(:payload, payload)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -1517,10 +1328,10 @@ defmodule WaitAllTestWorkflow do
   use Durable.Wait
 
   workflow "wait_all_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       results = wait_for_all(["approval_a", "approval_b"])
       {:ok, assign(data, :results, results)}
-    end)
+    end
   end
 end
 
@@ -1530,7 +1341,7 @@ defmodule InputWaitTestWorkflow do
   use Durable.Wait
 
   workflow "input_wait_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_approval("manager_approval",
           prompt: "Approve?",
@@ -1540,7 +1351,7 @@ defmodule InputWaitTestWorkflow do
         )
 
       {:ok, assign(data, :approval, result)}
-    end)
+    end
   end
 end
 
@@ -1550,10 +1361,10 @@ defmodule ApprovalTestWorkflow do
   use Durable.Wait
 
   workflow "approval_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_approval("expense_approval", prompt: "Approve expense?")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1563,7 +1374,7 @@ defmodule ChoiceTestWorkflow do
   use Durable.Wait
 
   workflow "choice_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_choice("shipping_method",
           prompt: "Select shipping:",
@@ -1574,7 +1385,7 @@ defmodule ChoiceTestWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1584,10 +1395,10 @@ defmodule TextTestWorkflow do
   use Durable.Wait
 
   workflow "text_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_text("feedback", prompt: "Enter feedback:")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1597,7 +1408,7 @@ defmodule FormTestWorkflow do
   use Durable.Wait
 
   workflow "form_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_form("equipment_request",
           prompt: "Select equipment:",
@@ -1608,7 +1419,7 @@ defmodule FormTestWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1618,7 +1429,7 @@ defmodule ShortTimeoutInputWorkflow do
   use Durable.Wait
 
   workflow "short_timeout_input" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_input("quick_input",
           timeout: seconds(1),
@@ -1626,7 +1437,7 @@ defmodule ShortTimeoutInputWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1636,7 +1447,7 @@ defmodule ShortTimeoutEventWorkflow do
   use Durable.Wait
 
   workflow "short_timeout_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("quick_event",
           timeout: seconds(1),
@@ -1644,7 +1455,7 @@ defmodule ShortTimeoutEventWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1653,9 +1464,9 @@ defmodule SimpleCompletingWorkflow do
   use Durable.Helpers
 
   workflow "simple_completing" do
-    step(:complete, fn data ->
+    step :complete, fn data ->
       {:ok, assign(data, :done, true)}
-    end)
+    end
   end
 end
 
@@ -1669,19 +1480,19 @@ defmodule ContextPreservationWorkflow do
   use Durable.Wait
 
   workflow "context_preservation" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       data =
         data
         |> assign(:before_wait, "preserved")
         |> assign(:counter, 1)
 
       {:ok, data}
-    end)
+    end
 
-    step(:wait_and_check, fn data ->
+    step :wait_and_check, fn data ->
       result = wait_for_event("continue")
       # These should still be accessible after resume
-      before = data[:before_wait]
+      before = data["before_wait"]
 
       data =
         data
@@ -1689,7 +1500,7 @@ defmodule ContextPreservationWorkflow do
         |> assign(:verified_before, before)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -1699,23 +1510,23 @@ defmodule MultiStepResumeWorkflow do
   use Durable.Wait
 
   workflow "multi_step_resume" do
-    step(:first, fn data ->
+    step :first, fn data ->
       {:ok, assign(data, :step1, true)}
-    end)
+    end
 
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_event("trigger")
       {:ok, assign(data, :wait_result, result)}
-    end)
+    end
 
-    step(:after_wait, fn data ->
+    step :after_wait, fn data ->
       data =
         data
         |> assign(:step3, true)
-        |> assign(:final, data[:step1] && data[:wait_result])
+        |> assign(:final, data["step1"] && data["wait_result"])
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -1725,21 +1536,21 @@ defmodule SequentialWaitsWorkflow do
   use Durable.Wait
 
   workflow "sequential_waits" do
-    step(:first_wait, fn data ->
+    step :first_wait, fn data ->
       result1 = wait_for_event("event1")
       {:ok, assign(data, :result1, result1)}
-    end)
+    end
 
-    step(:second_wait, fn data ->
+    step :second_wait, fn data ->
       result2 = wait_for_event("event2")
       {:ok, assign(data, :result2, result2)}
-    end)
+    end
 
-    step(:combine, fn data ->
-      r1 = data[:result1]
-      r2 = data[:result2]
+    step :combine, fn data ->
+      r1 = data["result1"]
+      r2 = data["result2"]
       {:ok, assign(data, :combined, %{first: r1, second: r2})}
-    end)
+    end
   end
 end
 
@@ -1749,7 +1560,7 @@ defmodule ZeroTimeoutEventWorkflow do
   use Durable.Wait
 
   workflow "zero_timeout_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("quick_event",
           timeout: 0,
@@ -1757,7 +1568,7 @@ defmodule ZeroTimeoutEventWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1769,10 +1580,10 @@ defmodule SpecialCharEventWorkflow do
   use Durable.Wait
 
   workflow "special_char_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_event("event-with_special.chars:123")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1782,10 +1593,10 @@ defmodule UnicodeEventWorkflow do
   use Durable.Wait
 
   workflow "unicode_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_event("событие_イベント")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1799,11 +1610,11 @@ defmodule TupleTimeoutValueWorkflow do
   use Durable.Wait
 
   workflow "tuple_timeout" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       # Idiomatic Elixir tuple — would crash JSONB insert before fix.
       result = wait_for_event("evt", timeout: hours(1), timeout_value: {:error, :timeout})
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1813,7 +1624,7 @@ defmodule NestedTupleTimeoutValueWorkflow do
   use Durable.Wait
 
   workflow "nested_tuple_timeout" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("evt",
           timeout: hours(1),
@@ -1821,6 +1632,6 @@ defmodule NestedTupleTimeoutValueWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end

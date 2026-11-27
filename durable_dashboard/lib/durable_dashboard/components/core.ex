@@ -9,6 +9,7 @@ defmodule DurableDashboard.Components.Core do
 
   use Phoenix.Component
 
+  alias DurableDashboard.Trace
   alias Phoenix.LiveView.JS
 
   # ============================================================================
@@ -25,7 +26,7 @@ defmodule DurableDashboard.Components.Core do
       <.icon name="x-mark" class="size-5" />
   """
   attr :name, :string, required: true
-  attr :class, :string, default: "size-4"
+  attr :class, :any, default: "size-4"
   attr :rest, :global
 
   def icon(%{name: "check"} = assigns) do
@@ -217,13 +218,95 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  # The Durable logo, as on durable.wavezync.com (site/public/favicon.svg):
+  # a step done, the wait, the next step. Its own colours, in both themes.
+  def icon(%{name: "mark"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 26" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 8H13" stroke="#8390ab" stroke-width="2.4" stroke-linecap="round" /><path d="M13 8C17 8 17 18 21 18H23" fill="none" stroke="#6997fc" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="2 3" /><circle cx="13" cy="8" r="4" fill="#f2785b" /><circle cx="22" cy="18" r="4" fill="#2bb3a3" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-overview"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-runs"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-workflows"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M6 8.5V12a4 4 0 0 0 4 4h5.5" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-inbox"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 13l3-8h12l3 8v6H3z" /><path d="M3 13h5l1.5 2.5h5L16 13h5" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-keys"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="8" cy="15" r="4" /><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-queues"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13l9 5 9-5" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-schedules"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-telemetry"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="12" cy="12" r="2" /><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-settings"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1" /><circle cx="15" cy="6" r="2" /><circle cx="9" cy="12" r="2" /><circle cx="17" cy="18" r="2" />
+    </svg>
+    """
+  end
+
   def icon(%{name: name} = assigns) when is_binary(name) do
     # Unknown icon — render a placeholder square so it's visible during dev.
     ~H"""
     <span
       role="img"
       aria-label={"icon: " <> @name}
-      title={"missing icon: " <> @name}
+      data-tip={"missing icon: " <> @name}
       class={[@class, "inline-block bg-destructive/30 rounded-sm"]}
       {@rest}
     >
@@ -288,24 +371,24 @@ defmodule DurableDashboard.Components.Core do
 
     size_class =
       case size do
-        "sm" -> " h-7 px-2.5 text-xs"
-        "md" -> " h-8 px-3 text-[13px]"
+        "sm" -> " h-[26px] px-2.5 text-xs"
+        "md" -> " h-[30px] px-3 text-[13px]"
         "lg" -> " h-10 px-4 text-sm"
       end
 
     kind_class =
       case kind do
         "primary" ->
-          " bg-primary text-primary-foreground hover:bg-primary/90"
+          " bg-foreground text-background hover:bg-foreground/90"
 
         "secondary" ->
-          " bg-secondary text-secondary-foreground border border-border hover:bg-accent"
+          " bg-card text-foreground border border-input hover:bg-accent"
 
         "ghost" ->
           " text-foreground hover:bg-accent hover:text-accent-foreground"
 
         "destructive" ->
-          " bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          " bg-card text-destructive border border-input hover:bg-destructive/10"
 
         "link" ->
           " text-primary underline-offset-4 hover:underline"
@@ -397,7 +480,7 @@ defmodule DurableDashboard.Components.Core do
     <kbd class={[
       "inline-flex items-center justify-center min-w-[20px] h-5 px-1.5",
       "rounded-sm border border-border bg-muted text-muted-foreground",
-      "font-mono text-[10px] tracking-wide",
+      "font-mono text-[11px] tracking-wide",
       @class
     ]}>
       {render_slot(@inner_block)}
@@ -434,8 +517,8 @@ defmodule DurableDashboard.Components.Core do
 
   defp badge_class(kind) do
     base =
-      "inline-flex items-center rounded-sm px-1.5 h-5 text-[10px] font-medium " <>
-        "uppercase tracking-wider whitespace-nowrap"
+      "inline-flex items-center rounded-[5px] px-1.5 h-5 text-[11px] font-medium " <>
+        "whitespace-nowrap"
 
     case kind do
       "default" -> base <> " bg-secondary text-secondary-foreground"
@@ -460,69 +543,217 @@ defmodule DurableDashboard.Components.Core do
 
       <.status_pill status={:running} />
       <.status_pill status="completed" />
+      <.status_pill status={:idle} label="Off" />
   """
   attr :status, :any, required: true
+
+  attr :label, :string,
+    default: nil,
+    doc: "overrides the status's own wording; shape and tone stay"
+
+  attr :tip, :any,
+    default: nil,
+    doc: "the tooltip: what the status means (`status_help/1`) unless given; false for none"
+
   attr :class, :string, default: nil
 
   def status_pill(assigns) do
-    {label, kind, dot} = status_meta(assigns.status)
-    assigns = assign(assigns, label: label, kind: kind, dot: dot)
+    {label, tone} = status_meta(assigns.status)
+    key = status_key(assigns.status)
+    tip = if is_nil(assigns.tip), do: status_help(key), else: assigns.tip
+
+    assigns =
+      assign(assigns, label: assigns.label || label, tone: tone, key: key, tip: tip || nil)
 
     ~H"""
-    <span class={[status_pill_class(@kind), @class]}>
-      <span :if={@dot != :none} class={status_dot_class(@kind, @dot)}></span>
+    <span class={[status_pill_class(@tone), @class]} data-tip={@tip} data-tip-title={@tip && @label}>
+      <.status_dot status={@key} />
       {@label}
     </span>
     """
   end
 
+  @doc """
+  A run's status in a list row: the mark and label, the step it is on or
+  stopped at, and its error on a second line. No pill ground, so a column of
+  them reads quietly; a completed run's label stays neutral and only states
+  that need a look take their color (`DESIGN.md` §6 "List / table row").
+
+      <.run_status run={row} />
+  """
+  attr :run, :map,
+    required: true,
+    doc: "a run with `:status`, `:current_step` and `:error`; `:parked` when it has one"
+
+  attr :now, :any, default: nil, doc: "the page's clock, for a parked run's countdown"
+
+  def run_status(assigns) do
+    run = assigns.run
+    parked = Map.get(run, :parked)
+    key = if parked, do: Atom.to_string(parked.status), else: status_key(run.status)
+    {label, tone} = status_meta(key)
+    {step, where} = step_where(key, run.current_step)
+    error = Trace.error_parts(run.error)
+
+    assigns =
+      assign(assigns,
+        key: key,
+        label: label,
+        tone: run_status_tone(tone),
+        step: step,
+        where: where,
+        then: parked && parked_time(parked, assigns.now || DurableDashboard.Clock.utc_now()),
+        note: (error && error.message) || run_note(run, parked),
+        error_type: error && error.type,
+        tip_title: if(step, do: label <> " " <> where <> step, else: label)
+      )
+
+    ~H"""
+    <div
+      class="flex min-w-0 flex-col leading-tight"
+      data-tip-title={@tip_title}
+      data-tip={@note || status_help(@key)}
+      data-tip-meta={@error_type}
+    >
+      <span class="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+        <.status_dot status={@key} />
+        <span class={["font-medium", @tone]}>{@label}</span>
+        <span :if={@step} class="min-w-0 truncate text-muted-foreground">
+          {@where}<span class={["font-mono text-xs", @tone]}>{@step}</span><span :if={@then}> {@then}</span>
+        </span>
+      </span>
+      <span :if={@note} class="truncate pl-3.5 text-xs text-muted-foreground">{@note}</span>
+    </div>
+    """
+  end
+
+  # The step a run is at, and the word before it: nil once it completed.
+  defp step_where(key, current_step) do
+    step = if key != "completed" && current_step, do: Trace.display_name(current_step)
+    {step, step && "#{where_word(key)} "}
+  end
+
+  defp where_word("compensated"), do: "after"
+  defp where_word("pending"), do: "next"
+  defp where_word(_status), do: "at"
+
+  # "in 12s · 2 of 5", "for 48s", or "due now" once its time has passed.
+  defp parked_time(%{status: :retrying} = parked, now) do
+    left = Trace.time_left(parked.at, now)
+    "#{if left, do: "in #{left}", else: "due now"} · #{Trace.attempts_used(parked)}"
+  end
+
+  defp parked_time(%{status: :snoozed} = parked, now) do
+    if left = Trace.time_left(parked.at, now), do: "for #{left}", else: "· due now"
+  end
+
+  defp run_note(_run, %{reason: reason}), do: reason
+
+  defp run_note(%{status: :pending} = run, nil) do
+    cond do
+      after_id = Map.get(run, :runs_after_id) ->
+        "Waiting for run #{String.slice(after_id, 0, 8)} to finish"
+
+      Map.get(run, :home_queue) ->
+        "Waiting for a slot on #{run.queue}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp run_note(_run, _parked), do: nil
+
+  defp run_status_tone("primary"), do: "text-primary"
+  defp run_status_tone("warning"), do: "text-warning"
+  defp run_status_tone("destructive"), do: "text-destructive"
+  defp run_status_tone("comp"), do: "text-comp"
+  defp run_status_tone(_calm), do: "text-subtle-foreground"
+
+  @doc """
+  The bare status mark — the shape that carries a status wherever a full pill
+  would be too heavy (trace rows, feeds, graph nodes). See `DESIGN.md` §4.
+  """
+  attr :status, :any, required: true
+  attr :class, :string, default: nil
+
+  def status_dot(assigns) do
+    assigns = assign(assigns, key: status_key(assigns.status))
+
+    ~H"""
+    <span class={["st-dot st-#{@key}", @class]} aria-hidden="true"></span>
+    """
+  end
+
+  @status_help %{
+    "pending" => "Queued · waiting for a worker to pick it up",
+    "retrying" => "A step failed · it runs again when its backoff ends",
+    "snoozed" => "A step asked to run again later · a snooze doesn't use an attempt",
+    "running" => "A worker is running its steps now",
+    "waiting" => "Paused on a sleep, an event or a person's input · resumes by itself",
+    "completed" => "Finished every step",
+    "failed" => "A step ran out of attempts · retry picks up from that step",
+    "cancelled" => "Stopped before it finished · by a person, its parent or a timeout",
+    "scheduled" => "Set to start later",
+    "compensating" => "A step failed · undoing the steps before it",
+    "compensated" => "A step failed, and the steps before it were undone",
+    "compensation_failed" => "A step failed, and undoing the steps before it failed too",
+    "timeout" => "Ran past its time limit",
+    "paused" => "Paused · resume to carry on",
+    "alive" => "Sending heartbeats",
+    "missing" => "No heartbeat lately · its runs are taken over once their locks go stale"
+  }
+
+  @doc """
+  What a status means, in a line — the tooltip on a status pill, and for any
+  other place that shows a status and wants to explain it.
+  """
+  @spec status_help(atom() | String.t()) :: String.t() | nil
+  def status_help(status), do: Map.get(@status_help, status_key(status))
+
+  defp status_key(s) when is_atom(s), do: Atom.to_string(s)
+  defp status_key(s) when is_binary(s), do: s
+
+  @status_meta %{
+    "pending" => {"Pending", "muted"},
+    "retrying" => {"Retrying", "warning"},
+    "snoozed" => {"Snoozed", "muted"},
+    "running" => {"Running", "primary"},
+    "waiting" => {"Waiting", "warning"},
+    "completed" => {"Completed", "success"},
+    "failed" => {"Failed", "destructive"},
+    "cancelled" => {"Cancelled", "muted"},
+    "scheduled" => {"Scheduled", "muted"},
+    "compensating" => {"Compensating", "comp"},
+    "compensated" => {"Compensated", "comp"},
+    "compensation_failed" => {"Compensation failed", "destructive"},
+    "timeout" => {"Timed out", "destructive"},
+    "paused" => {"Paused", "warning"},
+    "idle" => {"Idle", "muted"},
+    "alive" => {"Alive", "success"},
+    "missing" => {"Missing", "destructive"}
+  }
+
   defp status_meta(s) when is_atom(s), do: status_meta(Atom.to_string(s))
 
   defp status_meta(s) when is_binary(s) do
-    case s do
-      "pending" -> {"pending", "muted", :none}
-      "running" -> {"running", "success", :pulse}
-      "waiting" -> {"waiting", "warning", :solid}
-      "completed" -> {"completed", "success", :solid}
-      "failed" -> {"failed", "destructive", :none}
-      "cancelled" -> {"cancelled", "muted", :none}
-      "scheduled" -> {"scheduled", "info", :none}
-      "compensating" -> {"compensating", "warning", :pulse}
-      "timeout" -> {"timeout", "destructive", :none}
-      other -> {other, "muted", :none}
-    end
+    Map.get_lazy(@status_meta, s, fn ->
+      {s |> String.replace("_", " ") |> String.capitalize(), "muted"}
+    end)
   end
 
-  defp status_pill_class(kind) do
+  defp status_pill_class(tone) do
     base =
-      "inline-flex items-center gap-1.5 rounded-sm px-2 h-6 text-[11px] " <>
-        "font-medium whitespace-nowrap border"
+      "inline-flex items-center gap-1.5 h-[22px] pl-[7px] pr-2 rounded-md " <>
+        "text-xs font-medium whitespace-nowrap"
 
-    case kind do
-      "muted" -> base <> " bg-muted/40 text-muted-foreground border-border"
-      "success" -> base <> " bg-success/10 text-success border-success/20"
-      "warning" -> base <> " bg-warning/10 text-warning border-warning/20"
-      "destructive" -> base <> " bg-destructive/10 text-destructive border-destructive/20"
-      "info" -> base <> " bg-info/10 text-info border-info/20"
-    end
-  end
-
-  defp status_dot_class(kind, dot) do
-    base = "inline-block size-1.5 rounded-full"
-
-    color =
-      case kind do
-        "muted" -> " bg-muted-foreground"
-        "success" -> " bg-success"
-        "warning" -> " bg-warning"
-        "destructive" -> " bg-destructive"
-        "info" -> " bg-info"
-      end
-
-    case dot do
-      :pulse -> base <> color <> " led-dot"
-      :solid -> base <> color
-      :none -> base
+    case tone do
+      "muted" -> base <> " bg-secondary text-subtle-foreground"
+      "primary" -> base <> " bg-primary/13 text-primary"
+      "success" -> base <> " bg-success/13 text-success"
+      "warning" -> base <> " bg-warning/13 text-warning"
+      "destructive" -> base <> " bg-destructive/13 text-destructive"
+      "comp" -> base <> " bg-comp/14 text-comp"
     end
   end
 
@@ -548,8 +779,8 @@ defmodule DurableDashboard.Components.Core do
   attr :class, :string, default: nil
 
   def relative_time(assigns) do
-    {label, iso, full} = relative_time_parts(assigns.at)
-    assigns = assign(assigns, label: label, iso: iso, full: full)
+    {label, iso} = relative_time_parts(assigns.at)
+    assigns = assign(assigns, label: label, iso: iso)
 
     ~H"""
     <time
@@ -557,32 +788,29 @@ defmodule DurableDashboard.Components.Core do
       datetime={@iso}
       data-ts={@iso}
       data-rel="1"
-      title={@full}
-      class={["text-numeric text-xs", @class]}
+      class={["tabular-nums text-xs", @class]}
     >{@label}</time>
-    <span :if={!@iso} class={["text-numeric text-xs", @class]}>{@label}</span>
+    <span :if={!@iso} class={["tabular-nums text-xs", @class]}>{@label}</span>
     """
   end
 
-  # {humanized_label, iso8601 | nil, utc_fallback_tooltip}. `data-rel` tells the
-  # client hook to localize the tooltip only and keep the relative text.
-  defp relative_time_parts(nil), do: {"—", nil, nil}
+  # {humanized_label, iso8601 | nil}. `data-rel` tells the client to keep the
+  # relative text; the tooltip (`tooltip.ts`) shows the exact moment.
+  defp relative_time_parts(nil), do: {"—", nil}
 
   defp relative_time_parts(%DateTime{} = dt) do
-    diff_s = DateTime.diff(DateTime.utc_now(), dt, :second)
-
-    {humanize_diff(diff_s), DateTime.to_iso8601(dt),
-     Calendar.strftime(dt, "%b %-d, %Y, %H:%M:%S UTC")}
+    {humanize_diff(DateTime.diff(DurableDashboard.Clock.utc_now(), dt, :second)),
+     DateTime.to_iso8601(dt)}
   end
 
   defp relative_time_parts(%NaiveDateTime{} = dt) do
     case DateTime.from_naive(dt, "Etc/UTC") do
       {:ok, utc} -> relative_time_parts(utc)
-      _ -> {"—", nil, nil}
+      _ -> {"—", nil}
     end
   end
 
-  defp relative_time_parts(other), do: {to_string(other), nil, nil}
+  defp relative_time_parts(other), do: {to_string(other), nil}
 
   # Sign-aware: negative diff means the timestamp is in the future ("in 2h").
   defp humanize_diff(s) when abs(s) < 5, do: "just now"
@@ -720,16 +948,16 @@ defmodule DurableDashboard.Components.Core do
     ~H"""
     <section
       class={[
-        "rounded-xl border border-border bg-card text-card-foreground shadow-card",
+        "rounded-[10px] border border-border bg-card text-card-foreground",
         @class
       ]}
       {@rest}
     >
       <header
         :if={@title != [] or @action != []}
-        class="flex items-center justify-between gap-3 px-4 h-12 border-b border-border"
+        class="flex items-center justify-between gap-3 px-4 pt-3.5 pb-2.5"
       >
-        <h3 :if={@title != []} class="text-sm font-medium text-heading">
+        <h3 :if={@title != []} class="text-sm font-semibold">
           {render_slot(@title)}
         </h3>
         <div :if={@action != []} class="flex items-center gap-2">
@@ -804,7 +1032,7 @@ defmodule DurableDashboard.Components.Core do
       type="button"
       data-copy={@text}
       aria-label={@label}
-      title={@label}
+      data-tip={@label}
       class={[
         "copy-btn inline-flex shrink-0 items-center justify-center rounded-md p-1",
         "border border-border bg-card/80 text-muted-foreground backdrop-blur-sm",
@@ -870,7 +1098,7 @@ defmodule DurableDashboard.Components.Core do
   defp json_pad(n), do: String.duplicate("  ", n)
 
   # Structural punctuation ({ } [ ] : ,) — HTML-safe characters, no escaping.
-  defp json_punct(s), do: ["<span class=\"text-muted-foreground/50\">", s, "</span>"]
+  defp json_punct(s), do: ["<span class=\"text-muted-foreground\">", s, "</span>"]
 
   defp json_token(class, text) do
     ["<span class=\"", class, "\">", html_escape_to_string(text), "</span>"]
@@ -963,19 +1191,19 @@ defmodule DurableDashboard.Components.Core do
 
   defp heading_tag(%{level: 1} = assigns) do
     ~H"""
-    <h1 class="text-heading text-[22px]">{render_slot(@inner_block)}</h1>
+    <h1 class="text-[20px] font-semibold tracking-[-0.01em] leading-tight">{render_slot(@inner_block)}</h1>
     """
   end
 
   defp heading_tag(%{level: 2} = assigns) do
     ~H"""
-    <h2 class="text-heading text-[18px]">{render_slot(@inner_block)}</h2>
+    <h2 class="text-base font-semibold">{render_slot(@inner_block)}</h2>
     """
   end
 
   defp heading_tag(%{level: 3} = assigns) do
     ~H"""
-    <h3 class="text-heading text-sm">{render_slot(@inner_block)}</h3>
+    <h3 class="text-sm font-semibold">{render_slot(@inner_block)}</h3>
     """
   end
 
@@ -1008,6 +1236,58 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  @doc """
+  A run's workflow key: the caption `key` beside the value in mono, with a
+  hover copy button. `holds` adds a neutral badge — `true` "Holds key";
+  `false` "Key moved" when another run holds it (`holder`), "Key released"
+  when `released`, else "Key free" — and `holder` (`%{id, status}`) names who
+  holds it in the tooltip. Renders nothing for a run without a key. See
+  `DESIGN.md` §5.
+
+      <.key_chip key={run.key} holds={run.holds_key} holder={@holder} />
+  """
+  attr :key, :string, default: nil
+  attr :holds, :any, default: nil, doc: "true, false, or nil for no badge"
+  attr :holder, :map, default: nil, doc: "the run holding the key, `%{id, status}`"
+  attr :released, :boolean, default: false, doc: "an operator released this run's key"
+  attr :class, :any, default: nil
+
+  def key_chip(%{key: nil} = assigns), do: ~H""
+
+  def key_chip(assigns) do
+    assigns = assign(assigns, tip: key_tip(assigns))
+
+    ~H"""
+    <span class={["group/key inline-flex items-center gap-1.5 align-middle", @class]}>
+      <span
+        class="inline-flex h-[22px] items-center gap-1.5 rounded-[5px] bg-secondary px-1.5 text-xs"
+        data-tip-title="Workflow key"
+        data-tip={@tip}
+      >
+        <span class="text-muted-foreground">key</span>
+        <span class="font-mono text-foreground">{@key}</span>
+      </span>
+      <.copy_button
+        text={@key}
+        label="Copy key"
+        class="opacity-0 group-hover/key:opacity-100 focus-visible:opacity-100"
+      />
+      <.badge :if={@holds == true} kind="muted">Holds key</.badge>
+      <.badge :if={@holds == false and @holder != nil} kind="muted">Key moved</.badge>
+      <.badge :if={@holds == false and @holder == nil and @released} kind="muted">Key released</.badge>
+      <.badge :if={@holds == false and @holder == nil and !@released} kind="muted">Key free</.badge>
+    </span>
+    """
+  end
+
+  defp key_tip(%{holds: true}), do: "This run holds it · a start with this key returns this run"
+
+  defp key_tip(%{holder: %{id: id, status: status}}),
+    do: "Held by #{String.slice(id, 0, 8)} · #{elem(status_meta(status), 0)}"
+
+  defp key_tip(%{holds: false}), do: "No run holds it now · the next start with it takes it"
+  defp key_tip(_assigns), do: "Starts with this key make at most one run at a time"
+
   defp code_class(class) do
     [
       "font-mono text-numeric text-xs text-foreground/90",
@@ -1021,10 +1301,10 @@ defmodule DurableDashboard.Components.Core do
   # ============================================================================
 
   @doc """
-  A small uppercase, letter-spaced field label — the standard treatment for
-  key names, section headers, and metadata keys so a label reads as a label,
-  not a value. Centralizes the `font-mono uppercase tracking-…` idiom used
-  across the inspector, logs, and detail panels.
+  A small sentence-case caption in the muted tone — the standard treatment
+  for key names, column headers and metadata keys, so a label reads as a
+  label, not a value. Labels are sans and never uppercase; mono is for values
+  (ids, numbers, durations). See `DESIGN.md` §2.2.
 
   ## Examples
 
@@ -1039,7 +1319,7 @@ defmodule DurableDashboard.Components.Core do
     ~H"""
     <span
       class={[
-        "font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70",
+        "text-xs text-muted-foreground",
         @class
       ]}
       {@rest}

@@ -9,7 +9,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   import Ecto.Changeset
   import Ecto.Query
 
-  alias Durable.Storage.Dialect
+  alias Durable.Clock
 
   @type wait_type :: :any | :all
 
@@ -35,8 +35,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
-  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
+  @schema_prefix "durable"
   schema "wait_groups" do
     field(:step_name, :string)
 
@@ -46,7 +45,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
     )
 
     field(:event_names, {:array, :string})
-    field(:received_events, :map, default: %{})
+    field(:received_events, Durable.Storage.JsonMap, default: %{})
 
     field(:status, Ecto.Enum,
       values: [:pending, :completed, :timeout, :cancelled],
@@ -65,7 +64,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_id, :step_name, :wait_type, :event_names]
@@ -112,7 +111,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
         %{
           received_events: updated_events,
           status: :completed,
-          completed_at: DateTime.utc_now()
+          completed_at: Clock.utc_now()
         }
       else
         %{received_events: updated_events}
@@ -140,8 +139,10 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   """
   def add_event_locked(repo, wait_group_id, event_name, payload) do
     query =
-      from(w in __MODULE__, where: w.id == ^wait_group_id)
-      |> Dialect.for_update(repo)
+      from(w in __MODULE__,
+        where: w.id == ^wait_group_id,
+        lock: "FOR UPDATE"
+      )
 
     case repo.one(query) do
       nil ->
@@ -165,7 +166,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   """
   def timeout_changeset(wait_group) do
     wait_group
-    |> cast(%{status: :timeout, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :timeout, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 
   @doc """
@@ -173,6 +174,6 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   """
   def cancel_changeset(wait_group) do
     wait_group
-    |> cast(%{status: :cancelled, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :cancelled, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 end

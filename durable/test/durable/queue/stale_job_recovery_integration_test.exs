@@ -26,7 +26,13 @@ defmodule Durable.Queue.StaleJobRecoveryIntegrationTest do
   setup do
     # `stale_lock_timeout: 1` (seconds) lets us age a row past the cutoff in
     # ~1.1s of sleep without dragging the suite.
-    Durable.DataCase.start_supervised_durable!(stale_lock_timeout: 1)
+    # The pollers stay off "default", or one could claim a recovered row before
+    # the test reads it.
+    Durable.DataCase.start_supervised_durable!(
+      stale_lock_timeout: 1,
+      queues: %{unused: [concurrency: 1, poll_interval: 50]}
+    )
+
     TelemetryHandler.attach_events()
     :ok
   end
@@ -157,10 +163,7 @@ defmodule Durable.Queue.StaleJobRecoveryIntegrationTest do
       workflow_module: "TestWorkflow",
       workflow_name: Keyword.get(opts, :workflow_name, "test"),
       status: Keyword.get(opts, :status, :pending),
-      # A queue no poller serves: once recovery resets a row to :pending, the
-      # live "default" poller (50 ms) would otherwise re-claim it before the
-      # assertions read it. Recovery itself is queue-agnostic.
-      queue: "recovery_only",
+      queue: "default",
       priority: 0,
       input: %{},
       context: %{},

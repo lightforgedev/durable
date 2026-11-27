@@ -9,11 +9,32 @@ defmodule Durable.Config do
 
   * `:repo` - The Ecto repo module to use for persistence (required)
   * `:name` - Instance name for multiple Durable instances (default: `Durable`)
-  * `:prefix` - PostgreSQL schema name for table isolation (default: `"durable"`)
-  * `:queues` - Queue configuration map (default: `%{default: [concurrency: 10, poll_interval: 1000]}`)
+  * `:prefix` - PostgreSQL schema name. Only `"durable"` is supported for now:
+    the schemas are bound to it, so another value would write runs to one
+    schema and poll for them in another.
+  * `:queues` - Queue configuration map (default: `%{default: [concurrency: 10, poll_interval: 1000]}`).
+    `concurrency` is per node. `poll_interval` is how often an idle queue
+    checks for work, in milliseconds. With a `:pubsub`, a start or resume
+    wakes the queue's pollers at once, on every node in the cluster, so a long
+    interval only delays runs that come due later: sleeps, retries, snoozes
+    and delayed starts. Both are positive integers, and a queue takes nothing
+    else: a queue that could never claim, or a misspelt option, is refused
+    when Durable starts, with an error naming the queue.
+  * `:pubsub` - Phoenix.PubSub for lifecycle broadcasts and waking pollers:
+    a server name, `:start` for Durable's own, or `nil` (default). A start
+    inside your own transaction wakes them when it commits. Without a PubSub,
+    runs are claimed on the next poll
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)
+  * `:shutdown_grace_period` - Milliseconds a stopping node waits for its running
+    steps, with no new claims (default: `15_000`). Each run finishes its
+    current step, then goes back on its queue for another node. Keep your
+    platform's shutdown limit a few seconds longer than this: the hand-back
+    itself can take up to 5 seconds more when the database is busy. A step
+    still running then is killed, and its run goes back on its queue. At `0`
+    the node doesn't wait:
+    every run it has goes back on its queue at once
   * `:log_level` - Log level for Ecto queries, or `false` to disable (default: `false`)
 
   ## Examples
@@ -29,30 +50,25 @@ defmodule Durable.Config do
          high_priority: [concurrency: 20, poll_interval: 500]
        }}
 
-      # Multiple instances with different prefixes
-      {Durable, repo: MyApp.Repo, name: :workflows_a, prefix: "durable_a"}
-      {Durable, repo: MyApp.Repo, name: :workflows_b, prefix: "durable_b"}
-
   """
-
-  alias Durable.Queue.Adapter
-  alias Durable.Storage.Dialect
 
   @type t :: %__MODULE__{
           repo: module(),
           name: atom(),
-          prefix: String.t() | nil,
-          queue_adapter: module(),
+          prefix: String.t(),
           queues: map(),
           queue_enabled: boolean(),
           stale_lock_timeout: pos_integer(),
           heartbeat_interval: pos_integer(),
+          shutdown_grace_period: non_neg_integer(),
           scheduled_modules: [module()],
           scheduler_interval: pos_integer(),
           sleep_waker_interval: pos_integer(),
           sleep_waker_batch_size: pos_integer(),
           log_level: false | :debug | :info | :warning | :error,
           pubsub: atom() | nil,
+          prune: keyword() | nil,
+          node_id: String.t() | nil,
           owns_pubsub?: boolean()
         }
 
@@ -60,17 +76,19 @@ defmodule Durable.Config do
     :repo,
     :name,
     :prefix,
-    :queue_adapter,
     :queues,
     :queue_enabled,
     :stale_lock_timeout,
     :heartbeat_interval,
+    :shutdown_grace_period,
     :scheduled_modules,
     :scheduler_interval,
     :sleep_waker_interval,
     :sleep_waker_batch_size,
     :log_level,
     :pubsub,
+    :prune,
+    :node_id,
     owns_pubsub?: false
   ]
 
@@ -86,21 +104,12 @@ defmodule Durable.Config do
       doc: "Instance name for multiple Durable instances"
     ],
     prefix: [
-      type: :string,
+      type: {:in, ["durable"]},
       default: "durable",
-      doc:
-        "PostgreSQL schema name for table isolation. Resolved to nil on SQLite, " <>
-          "which has no schemas."
-    ],
-    queue_adapter: [
-      type: :atom,
-      default: nil,
-      doc:
-        "Queue adapter module (`Durable.Queue.Adapter`). Defaults to the adapter " <>
-          "for the repo's database (PostgreSQL or SQLite)."
+      doc: "PostgreSQL schema name; only \"durable\" is supported for now"
     ],
     queues: [
-      type: :map,
+      type: {:custom, __MODULE__, :validate_queues, []},
       default: %{default: [concurrency: 10, poll_interval: 1000]},
       doc: "Queue configuration map"
     ],
@@ -118,6 +127,13 @@ defmodule Durable.Config do
       type: :pos_integer,
       default: 30_000,
       doc: "Milliseconds between worker heartbeats"
+    ],
+    shutdown_grace_period: [
+      type: :non_neg_integer,
+      default: 15_000,
+      doc:
+        "Milliseconds a stopping node waits for its running steps before it hands " <>
+          "their runs back; 0 hands them back at once"
     ],
     scheduled_modules: [
       type: {:list, :atom},
@@ -150,12 +166,80 @@ defmodule Durable.Config do
       type: :atom,
       default: nil,
       doc:
-        "Phoenix.PubSub server name for lifecycle broadcasts. " <>
+        "Phoenix.PubSub server name for lifecycle broadcasts, which also wake a " <>
+          "queue's pollers when a run starts or resumes. " <>
           "Pass an atom like `MyApp.PubSub` to reuse a PubSub started by the host app. " <>
           "Pass `:start` to have Durable start its own (named after the instance). " <>
           "Leave as `nil` to disable broadcasting (default)."
+    ],
+    prune: [
+      type:
+        {:or,
+         [
+           nil,
+           {:keyword_list,
+            [
+              completed: [type: :pos_integer, doc: "Keep completed runs this many ms."],
+              failed: [type: :pos_integer, doc: "Keep failed and rolled-back runs this many ms."],
+              cancelled: [type: :pos_integer, doc: "Keep cancelled runs this many ms."]
+            ]}
+         ]},
+      default: nil,
+      doc:
+        "Delete finished runs (with their steps, inputs and events) once they are older " <>
+          "than the given age in ms, e.g. `[completed: :timer.hours(24 * 14)]`. " <>
+          "Statuses left out are kept forever. Off by default."
     ]
   ]
+
+  # What `Queue.Manager` reads for each queue. No defaults here: it has its own.
+  @queue_schema NimbleOptions.new!(
+                  concurrency: [type: :pos_integer],
+                  poll_interval: [type: :pos_integer]
+                )
+
+  @doc false
+  # A queue with `concurrency: 0` would boot and never claim, and options that
+  # aren't a keyword list crashed the queue manager as it started.
+  def validate_queues(queues) when is_map(queues),
+    do: Enum.find_value(queues, {:ok, queues}, &queue_error/1)
+
+  def validate_queues(other), do: {:error, "expected map, got: #{inspect(other)}"}
+
+  defp queue_error({name, _opts}) when not is_atom(name),
+    do: {:error, "a queue's name is an atom, got: #{inspect(name)}"}
+
+  defp queue_error({name, opts}) do
+    with true <- Keyword.keyword?(opts),
+         {:ok, _valid} <- NimbleOptions.validate(opts, @queue_schema) do
+      nil
+    else
+      false -> {:error, "queue #{inspect(name)} takes a keyword list, got: #{inspect(opts)}"}
+      {:error, error} -> {:error, "queue #{inspect(name)}: #{Exception.message(error)}"}
+    end
+  end
+
+  # One id per running instance: the Erlang node name when distributed, else
+  # the hostname plus a per-boot suffix. Pollers stamp it into `locked_by`,
+  # and the node registry keys its heartbeat row on it.
+  defp node_id(name) do
+    cond do
+      node() == :nonode@nohost ->
+        {:ok, host} = :inet.gethostname()
+        # Random: System.unique_integer/1 starts from the same place on every
+        # boot, so two VMs on one host got one id, and one's shutdown handed
+        # back the other's running runs.
+        "#{host}-#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
+
+      name == Durable ->
+        Atom.to_string(node())
+
+      # Two instances on one node share its name, and one's shutdown handed
+      # back the other's running runs.
+      true ->
+        "#{node()}/#{inspect(name)}"
+    end
+  end
 
   @doc """
   Creates a new validated configuration from options.
@@ -173,8 +257,8 @@ defmodule Durable.Config do
 
     case NimbleOptions.validate(opts, @schema) do
       {:ok, validated} ->
-        validated = validated |> resolve_pubsub() |> resolve_storage()
-        {:ok, struct(__MODULE__, validated)}
+        validated = resolve_pubsub(validated)
+        {:ok, %{struct(__MODULE__, validated) | node_id: node_id(validated[:name])}}
 
       {:error, %NimbleOptions.ValidationError{}} = error ->
         error
@@ -205,26 +289,6 @@ defmodule Durable.Config do
       _ ->
         opts
     end
-  end
-
-  # Resolve the storage dialect from the repo's Ecto adapter. SQLite has no
-  # schemas, so the prefix becomes nil; the queue adapter follows the
-  # database unless the host chose one.
-  defp resolve_storage(opts) do
-    repo = Keyword.fetch!(opts, :repo)
-
-    dialect =
-      if Code.ensure_loaded?(repo) and function_exported?(repo, :__adapter__, 0),
-        do: Dialect.of(repo),
-        else: :postgres
-
-    opts
-    |> Keyword.update(:prefix, nil, &if(dialect == :sqlite, do: nil, else: &1))
-    |> Keyword.update(
-      :queue_adapter,
-      nil,
-      &(&1 || Adapter.default_adapter(dialect))
-    )
   end
 
   @doc """

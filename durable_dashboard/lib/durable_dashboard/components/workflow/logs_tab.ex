@@ -17,7 +17,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Components.Workflow.LogLine
 
-  @levels ["all", "debug", "info", "warning", "error"]
+  @levels ["all", "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
   @per_page 100
 
   @impl true
@@ -38,15 +38,15 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   end
 
   @impl true
-  def handle_event("filter:step", %{"step" => step}, socket) do
+  def handle_event("filter:step", %{"step" => step}, socket) when is_binary(step) do
     {:noreply, assign(socket, step_filter: step, page: 1)}
   end
 
-  def handle_event("filter:level", %{"level" => level}, socket) do
+  def handle_event("filter:level", %{"level" => level}, socket) when is_binary(level) do
     {:noreply, assign(socket, level_filter: level, page: 1)}
   end
 
-  def handle_event("filter:search", %{"value" => search}, socket) do
+  def handle_event("filter:search", %{"value" => search}, socket) when is_binary(search) do
     {:noreply, assign(socket, search: search, page: 1)}
   end
 
@@ -60,17 +60,20 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   end
 
   def handle_event("page:set", %{"page" => page}, socket) do
-    {:noreply, assign(socket, page: to_int(page, socket.assigns.page))}
+    {:noreply, assign(socket, page: DurableDashboard.Params.int(page, socket.assigns.page))}
   end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   @impl true
   def render(assigns) do
     filtered =
       assigns.steps
       |> flatten_logs()
-      |> Enum.filter(&match_step?(&1, assigns.step_filter))
-      |> Enum.filter(&match_level?(&1, assigns.level_filter))
-      |> Enum.filter(&match_search?(&1, assigns.search))
+      |> Enum.filter(
+        &(match_step?(&1, assigns.step_filter) and match_level?(&1, assigns.level_filter) and
+            match_search?(&1, assigns.search))
+      )
       |> sort_logs(assigns.sort_dir)
 
     total = length(filtered)
@@ -149,7 +152,11 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
     ~H"""
     <div class="flex flex-wrap items-center gap-2">
       <form phx-change="filter:level" phx-target={@myself}>
-        <select name="level" class={select_class()}>
+        <select
+          name="level"
+          class={select_class()}
+          data-tip="Show one level · counts are lines at that level"
+        >
           <option :for={level <- @levels} value={level} selected={level == @level_filter}>
             {humanize(level)}{if level != "all", do: " (#{Map.get(@counts, level, 0)})", else: ""}
           </option>
@@ -157,7 +164,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
       </form>
 
       <form phx-change="filter:step" phx-target={@myself}>
-        <select name="step" class={select_class()}>
+        <select name="step" class={select_class()} data-tip="Show the lines one step logged">
           <option :for={step <- @step_options} value={step} selected={step == @step_filter}>
             {humanize(step)}
           </option>
@@ -195,7 +202,8 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
           "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-input/40 px-2.5",
           "font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
         ]}
-        title="Toggle timestamp sort"
+        data-tip-title={if @sort_dir == :asc, do: "Oldest first", else: "Newest first"}
+        data-tip="Click to flip the order"
       >
         Time
         <span class="text-foreground">{if @sort_dir == :asc, do: "↑", else: "↓"}</span>
@@ -248,6 +256,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
           disabled={@page <= 1}
           class={pager_btn(@page <= 1)}
           aria-label="Previous page"
+          data-tip="Previous page"
         >
           <Core.icon name="chevron-left" class="size-4" />
         </button>
@@ -262,6 +271,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
           disabled={@page >= @total_pages}
           class={pager_btn(@page >= @total_pages)}
           aria-label="Next page"
+          data-tip="Next page"
         >
           <Core.icon name="chevron-right" class="size-4" />
         </button>
@@ -288,16 +298,6 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   defp humanize("all"), do: "All"
   defp humanize(s) when is_binary(s), do: s
   defp humanize(s), do: to_string(s)
-
-  defp to_int(v, default) when is_binary(v) do
-    case Integer.parse(v) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp to_int(v, _default) when is_integer(v), do: v
-  defp to_int(_, default), do: default
 
   # ============================================================================
   # Filtering / sorting

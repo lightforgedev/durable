@@ -27,6 +27,7 @@ defmodule Durable.LogCapture.Handler do
   """
 
   @handler_id :durable_log_capture
+  @console_filter :durable_step_lines
 
   @doc """
   Attaches the log capture handler to the Logger.
@@ -38,6 +39,8 @@ defmodule Durable.LogCapture.Handler do
   """
   @spec attach() :: :ok | {:error, term()}
   def attach do
+    filter_console(Keyword.get(Application.get_env(:durable, :log_capture, []), :console, true))
+
     config = %{
       level: :all,
       filter_default: :log
@@ -54,6 +57,23 @@ defmodule Durable.LogCapture.Handler do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # On the console's handler alone: Durable's own and any others see every line.
+  # Either call may find nothing to do, which is fine.
+  defp filter_console(true), do: :logger.remove_handler_filter(:default, @console_filter)
+
+  defp filter_console(false) do
+    :logger.add_handler_filter(:default, @console_filter, {&__MODULE__.console_filter/2, []})
+  end
+
+  @doc false
+  # Only lines that get saved are held back. They're saved when the step ends,
+  # so a step that's killed (a cancel, a dead node, a lost lock) loses them.
+  def console_filter(%{level: level, meta: meta}, _arg) do
+    if Durable.LogCapture.saves?(level) and not Map.get(meta, :durable_internal, false),
+      do: :stop,
+      else: :ignore
   end
 
   @doc """
@@ -97,21 +117,28 @@ defmodule Durable.LogCapture.Handler do
   end
 
   @doc false
+  # `:logger` removes a handler that raises, which would end capture for the
+  # whole node over one line. A line that can't be read just isn't saved.
   def log(%{level: level, msg: msg, meta: meta}, _config) do
-    # Only capture logs when in workflow context
-    if Durable.LogCapture.in_workflow_context?() do
+    # Only capture logs when in workflow context, and not Durable's own lines
+    # (its default telemetry logger runs in the step's process).
+    if Durable.LogCapture.in_workflow_context?() and not Map.get(meta, :durable_internal, false) do
       formatted_message = format_message(msg)
       metadata = format_metadata(meta)
       Durable.LogCapture.add_log(level, formatted_message, metadata)
     end
 
     :ok
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   # Message formatting
 
   defp format_message({:string, msg}) do
-    IO.iodata_to_binary(msg)
+    IO.chardata_to_string(msg)
   end
 
   defp format_message({:report, report}) when is_map(report) do
@@ -127,7 +154,7 @@ defmodule Durable.LogCapture.Handler do
   end
 
   defp format_message(msg) when is_list(msg) do
-    IO.iodata_to_binary(msg)
+    IO.chardata_to_string(msg)
   end
 
   defp format_message(msg) do
@@ -136,15 +163,13 @@ defmodule Durable.LogCapture.Handler do
 
   # Metadata formatting
 
-  defp format_metadata(meta) when is_map(meta) do
+  defp format_metadata(meta) do
     # Convert known keys to atoms for consistent handling
     meta
     |> Map.new(fn
       {k, v} when is_atom(k) -> {k, v}
-      {k, v} when is_binary(k) -> {String.to_atom(k), v}
+      {k, v} when is_binary(k) -> {Durable.Context.known_key(k), v}
       {k, v} -> {k, v}
     end)
   end
-
-  defp format_metadata(_), do: %{}
 end

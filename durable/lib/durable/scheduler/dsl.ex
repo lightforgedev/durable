@@ -10,12 +10,12 @@ defmodule Durable.Scheduler.DSL do
 
         @schedule cron: "0 9 * * *", timezone: "America/New_York"
         workflow "generate_report" do
-          step :fetch_data do
-            # ...
+          step :fetch_data, fn _input ->
+            {:ok, %{sales: Sales.yesterday()}}
           end
 
-          step :generate do
-            # ...
+          step :generate, fn data ->
+            {:ok, Map.put(data, "report", Reports.build(data["sales"]))}
           end
         end
       end
@@ -31,6 +31,11 @@ defmodule Durable.Scheduler.DSL do
   - `:timezone` - Timezone for cron evaluation (default: "UTC")
   - `:input` - Static input for each execution (default: %{})
   - `:queue` - Queue to run on (default: :default)
+  - `:key` - Workflow key each run starts with. A fire while the last run
+    still holds the key follows the workflow's `on_duplicate:`; with the
+    default `:use_existing` it starts nothing, and Activity records it.
+    Checked as `Durable.start/3`'s `key:` is: a string of 1 to 255 bytes,
+    kept as given; `""` is refused, not taken for no key
 
   """
 
@@ -80,7 +85,8 @@ defmodule Durable.Scheduler.DSL do
           name: Keyword.get(schedule_opts, :name),
           timezone: Keyword.get(schedule_opts, :timezone),
           input: Keyword.get(schedule_opts, :input),
-          queue: Keyword.get(schedule_opts, :queue)
+          queue: Keyword.get(schedule_opts, :queue),
+          key: Keyword.get(schedule_opts, :key)
         }
 
         Module.put_attribute(module, :durable_schedules, schedule_def)

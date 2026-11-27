@@ -17,12 +17,9 @@ defmodule Durable.Integration.ConcurrencyTest do
   @moduletag :integration
 
   alias Durable.Config
-  alias Durable.Queue.Adapter
-  alias Durable.Storage.Dialect
+  alias Durable.Queue.Adapters.Postgres
   alias Durable.Storage.Schemas.{PendingEvent, WaitGroup, WorkflowExecution}
   alias Ecto.Adapters.SQL.Sandbox
-
-  import Ecto.Query
 
   @repo Durable.TestRepo
 
@@ -35,22 +32,15 @@ defmodule Durable.Integration.ConcurrencyTest do
 
   defp truncate! do
     Sandbox.unboxed_run(@repo, fn ->
-      if Dialect.sqlite?(@repo) do
-        # Child tables cascade from workflow_executions (ON DELETE CASCADE).
-        @repo.query!("PRAGMA foreign_keys = ON")
-        @repo.query!("DELETE FROM workflow_executions")
-        @repo.query!("DELETE FROM scheduled_workflows")
-      else
-        @repo.query!(
-          "TRUNCATE durable.workflow_executions, durable.scheduled_workflows RESTART IDENTITY CASCADE"
-        )
-      end
+      @repo.query!(
+        "TRUNCATE durable.workflow_executions, durable.scheduled_workflows RESTART IDENTITY CASCADE"
+      )
     end)
   end
 
   defp committed(fun), do: Sandbox.unboxed_run(@repo, fun)
 
-  describe "fetch_jobs/4 — exclusive claims across real connections (SKIP LOCKED / IMMEDIATE)" do
+  describe "fetch_jobs/4 — FOR UPDATE SKIP LOCKED across real backends" do
     test "two workers claiming concurrently never double-claim a job", %{config: config} do
       committed(fn ->
         for i <- 1..40 do
@@ -68,7 +58,7 @@ defmodule Durable.Integration.ConcurrencyTest do
 
       claim = fn node ->
         committed(fn ->
-          Adapter.for_config(config).fetch_jobs(config, "default", 30, node) |> Enum.map(& &1.id)
+          config |> Postgres.fetch_jobs("default", 30, node) |> Enum.map(& &1.id)
         end)
       end
 
@@ -87,35 +77,6 @@ defmodule Durable.Integration.ConcurrencyTest do
       # Every job is claimed exactly once across the two workers.
       assert length(a) + length(b) == 40
       assert MapSet.size(MapSet.new(a ++ b)) == 40
-    end
-  end
-
-  describe "Durable.start/3 idempotency under real contention" do
-    test "concurrent identical starts admit exactly one run", %{config: _config} do
-      start = fn ->
-        committed(fn ->
-          Durable.start(
-            Durable.Integration.IdempotentStartWorkflow,
-            %{request_id: "concurrent-1"},
-            idempotency_key: "concurrent-1"
-          )
-        end)
-      end
-
-      results =
-        1..8
-        |> Enum.map(fn _index -> Task.async(start) end)
-        |> Task.await_many(15_000)
-
-      assert Enum.uniq(results) |> length() == 1
-      assert [{:ok, workflow_id}] = Enum.uniq(results)
-
-      assert committed(fn ->
-               @repo.aggregate(
-                 from(w in WorkflowExecution, where: w.id == ^workflow_id),
-                 :count
-               )
-             end) == 1
     end
   end
 
@@ -191,13 +152,5 @@ defmodule Durable.Integration.ConcurrencyTest do
       # Exactly one task observed the group transition to :completed.
       assert committed(fn -> @repo.get!(WaitGroup, wg_id).status end) == :completed
     end
-  end
-end
-
-defmodule Durable.Integration.IdempotentStartWorkflow do
-  use Durable
-
-  workflow "concurrent_idempotent_start" do
-    step(:complete, fn data -> {:ok, data} end)
   end
 end

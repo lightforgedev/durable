@@ -13,7 +13,8 @@ defmodule Durable.Definition do
     ## Pipeline Model
 
     Steps use a pure pipeline model where data flows from step to step:
-    - Each step receives one argument: the data from the previous step
+    - Each step receives one argument: the data from the previous step, as it
+      is stored, with string keys at every depth
     - First step receives the workflow input
     - Each step returns `{:ok, data}` or `{:error, reason}`
 
@@ -38,7 +39,10 @@ defmodule Durable.Definition do
               optional(:retry) => retry_opts(),
               optional(:timeout) => pos_integer(),
               optional(:compensate) => atom(),
-              optional(:queue) => atom()
+              optional(:queue) => atom(),
+              # What a block keeps about what it holds: its clauses or lanes,
+              # the steps inside it, and the name it was written with.
+              optional(atom()) => term()
             }
           }
 
@@ -73,7 +77,7 @@ defmodule Durable.Definition do
     Compensation functions receive the current data and return `{:ok, data}`:
 
         compensate :cancel_flight, fn data ->
-          FlightAPI.cancel(data.flight_booking_id)
+          FlightAPI.cancel(data["flight_booking_id"])
           {:ok, data}
         end
     """
@@ -81,7 +85,7 @@ defmodule Durable.Definition do
     @type t :: %__MODULE__{
             name: atom(),
             module: module(),
-            body_fn: (map() -> {:ok, map()} | {:error, term()}) | nil,
+            body_fn: (map() -> {:ok, map()} | {:error, term()} | {:fail, term()}) | nil,
             opts: %{
               optional(:retry) => Step.retry_opts(),
               optional(:timeout) => pos_integer()
@@ -116,8 +120,7 @@ defmodule Durable.Definition do
             compensations: %{atom() => Compensation.t()},
             opts: %{
               optional(:timeout) => pos_integer(),
-              optional(:max_retries) => pos_integer(),
-              optional(:queue) => atom()
+              optional(:queue) => atom() | String.t()
             }
           }
 

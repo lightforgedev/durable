@@ -4,17 +4,63 @@ defmodule Durable.Queue.Adapters.PostgresTest do
   import Ecto.Query
 
   alias Durable.Config
-  # Runs against the adapter for the test database (DURABLE_TEST_DB), so the
-  # same contract covers Durable.Queue.Adapters.Postgres and .SQLite.
-  @adapter Durable.Queue.Adapter.default_adapter(
-             Application.compile_env(:durable, :test_db, :postgres)
-           )
-  alias Durable.Storage.Schemas.WorkflowExecution
+  alias Durable.Queue.Adapters.Postgres
+  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   defp config, do: Config.get(Durable)
   defp repo, do: config().repo
 
   describe "fetch_jobs/4" do
+    test "reads a deep backlog in order, instead of sorting it" do
+      repo().query!("""
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, status, queue, input, context, inserted_at, updated_at)
+      SELECT gen_random_uuid(), 'M', 'w', 'pending', 'default', '{}', '{}', now(), now()
+      FROM generate_series(1, 20000)
+      """)
+
+      repo().query!("ANALYZE durable.workflow_executions")
+
+      plan =
+        repo().query!("EXPLAIN " <> Postgres.claim_sql(config()), ["default", 10, "node_a"]).rows
+        |> List.flatten()
+        |> Enum.join("\n")
+
+      assert plan =~ "workflow_executions_claim_index"
+      refute plan =~ "Sort"
+    end
+
+    # Every run of a key waits while another keeps a stopped worker's lock.
+    # Without an index of its own, that check reads every run a worker holds,
+    # or the key's whole history.
+    test "checks a key for a kept lock without reading the key's history" do
+      repo().query!("""
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, key, status, queue, input, context,
+         completed_at, inserted_at, updated_at)
+      SELECT gen_random_uuid(), 'M', 'w', 'account:7', 'completed', 'default', '{}', '{}',
+             now(), now(), now()
+      FROM generate_series(1, 20000)
+      """)
+
+      repo().query!("""
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, key, status, queue, input, context,
+         inserted_at, updated_at)
+      VALUES (gen_random_uuid(), 'M', 'w', 'account:7', 'pending', 'default', '{}', '{}',
+              now(), now())
+      """)
+
+      repo().query!("ANALYZE durable.workflow_executions")
+
+      plan =
+        repo().query!("EXPLAIN " <> Postgres.claim_sql(config()), ["default", 10, "node_a"]).rows
+        |> List.flatten()
+        |> Enum.join("\n")
+
+      assert plan =~ "workflow_executions_kept_lock_index"
+    end
+
     test "claims pending jobs atomically" do
       # Create 5 pending jobs
       for i <- 1..5 do
@@ -22,7 +68,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       end
 
       # Fetch 3 jobs
-      jobs = @adapter.fetch_jobs(config(), "default", 3, "node_a")
+      jobs = Postgres.fetch_jobs(config(), "default", 3, "node_a")
 
       assert length(jobs) == 3
 
@@ -41,7 +87,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       high = insert_execution(priority: 10, workflow_name: "high")
       medium = insert_execution(priority: 5, workflow_name: "medium")
 
-      jobs = @adapter.fetch_jobs(config(), "default", 3, "node_a")
+      jobs = Postgres.fetch_jobs(config(), "default", 3, "node_a")
 
       assert length(jobs) == 3
       assert Enum.at(jobs, 0).id == high.id
@@ -57,12 +103,42 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       job_later = insert_execution(scheduled_at: later, workflow_name: "later")
       job_earlier = insert_execution(scheduled_at: earlier, workflow_name: "earlier")
 
-      jobs = @adapter.fetch_jobs(config(), "default", 2, "node_a")
+      jobs = Postgres.fetch_jobs(config(), "default", 2, "node_a")
 
       assert length(jobs) == 2
       # Earlier scheduled_at should come first
       assert Enum.at(jobs, 0).id == job_earlier.id
       assert Enum.at(jobs, 1).id == job_later.id
+    end
+
+    test "orders runs by when they became ready, whether or not they have a time" do
+      now = DateTime.utc_now()
+
+      fresh = insert_execution(workflow_name: "fresh")
+
+      retry =
+        insert_execution(workflow_name: "retry", scheduled_at: DateTime.add(now, -60, :second))
+
+      repo().update_all(
+        from(w in WorkflowExecution, where: w.id == ^fresh.id),
+        set: [inserted_at: DateTime.add(now, -30, :second)]
+      )
+
+      assert [%{id: first}, %{id: second}] =
+               Postgres.fetch_jobs(config(), "default", 2, "node_a")
+
+      assert {first, second} == {retry.id, fresh.id}
+    end
+
+    test "claims the longest-ready run first when only one slot is free" do
+      now = DateTime.utc_now()
+      _fresh = insert_execution(workflow_name: "fresh")
+
+      retry =
+        insert_execution(workflow_name: "retry", scheduled_at: DateTime.add(now, -60, :second))
+
+      assert [%{id: id}] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      assert id == retry.id
     end
 
     test "skips already locked jobs" do
@@ -78,7 +154,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       # Create an unlocked job
       unlocked = insert_execution(workflow_name: "unlocked")
 
-      jobs = @adapter.fetch_jobs(config(), "default", 10, "node_a")
+      jobs = Postgres.fetch_jobs(config(), "default", 10, "node_a")
 
       assert length(jobs) == 1
       assert Enum.at(jobs, 0).id == unlocked.id
@@ -89,7 +165,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       _future_job = insert_execution(scheduled_at: future, workflow_name: "future")
       now_job = insert_execution(workflow_name: "now")
 
-      jobs = @adapter.fetch_jobs(config(), "default", 10, "node_a")
+      jobs = Postgres.fetch_jobs(config(), "default", 10, "node_a")
 
       assert length(jobs) == 1
       assert Enum.at(jobs, 0).id == now_job.id
@@ -104,8 +180,8 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       end
 
       # Simulate concurrent claims
-      task1 = Task.async(fn -> @adapter.fetch_jobs(cfg, "default", 5, "node_a") end)
-      task2 = Task.async(fn -> @adapter.fetch_jobs(cfg, "default", 5, "node_b") end)
+      task1 = Task.async(fn -> Postgres.fetch_jobs(cfg, "default", 5, "node_a") end)
+      task2 = Task.async(fn -> Postgres.fetch_jobs(cfg, "default", 5, "node_b") end)
 
       jobs1 = Task.await(task1)
       jobs2 = Task.await(task2)
@@ -132,7 +208,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      {:ok, count} = @adapter.recover_stale_locks(config(), 300)
+      {:ok, count} = Postgres.recover_stale_locks(config(), 300)
 
       assert count == 1
 
@@ -154,13 +230,69 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      {:ok, count} = @adapter.recover_stale_locks(config(), 300)
+      {:ok, count} = Postgres.recover_stale_locks(config(), 300)
 
       assert count == 0
 
       execution = repo().get!(WorkflowExecution, recent_job.id)
       assert execution.status == :running
       assert execution.locked_by == "active_node"
+    end
+  end
+
+  describe "the step rows a recovered run leaves behind" do
+    test "a crash closes them as failed, so they count as attempts" do
+      stale = DateTime.add(DateTime.utc_now(), -600, :second)
+
+      run =
+        insert_execution(
+          workflow_name: "crashed",
+          status: :running,
+          locked_by: "gone",
+          locked_at: stale
+        )
+
+      running = insert_step(run, status: :running)
+      completed = insert_step(run, status: :completed, step_name: "earlier")
+
+      {:ok, 1} = Postgres.recover_stale_locks(config(), 300)
+
+      assert %{status: :failed, error: %{"type" => "worker_lost"}, completed_at: %DateTime{}} =
+               repo().get!(StepExecution, running.id)
+
+      assert %{status: :completed} = repo().get!(StepExecution, completed.id)
+    end
+
+    test "a deploy's hand-back closes them without using an attempt" do
+      run =
+        insert_execution(
+          workflow_name: "handed_back",
+          status: :running,
+          locked_by: "node_a",
+          locked_at: DateTime.utc_now()
+        )
+
+      running = insert_step(run, status: :running)
+
+      {:ok, 1} = Postgres.release_node_jobs(config(), "node_a")
+
+      assert %{status: :snoozed, error: %{"type" => "node_stopped"}} =
+               repo().get!(StepExecution, running.id)
+
+      assert repo().get!(WorkflowExecution, run.id).status == :pending
+    end
+
+    test "another run's rows are left alone" do
+      stale = DateTime.add(DateTime.utc_now(), -600, :second)
+      insert_execution(status: :running, locked_by: "gone", locked_at: stale)
+
+      healthy =
+        insert_execution(status: :running, locked_by: "alive", locked_at: DateTime.utc_now())
+
+      row = insert_step(healthy, status: :running)
+
+      {:ok, 1} = Postgres.recover_stale_locks(config(), 300)
+      assert %{status: :running} = repo().get!(StepExecution, row.id)
     end
   end
 
@@ -179,7 +311,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 1
 
       reloaded = repo().get!(WorkflowExecution, zombie.id)
@@ -212,7 +344,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         })
         |> repo().insert()
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, waiter.id)
@@ -240,7 +372,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         })
         |> repo().insert()
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, waiter.id)
@@ -253,7 +385,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       recent_waiter =
         insert_execution(workflow_name: "recent_waiter", status: :waiting)
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, recent_waiter.id)
@@ -272,7 +404,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       assert repo().get!(WorkflowExecution, running.id).status == :running
@@ -290,16 +422,21 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 1
       assert repo().get!(WorkflowExecution, zombie.id).status == :failed
     end
 
-    test "leaves :compensating workflows with a running compensation step alone" do
-      alias Durable.Storage.Schemas.StepExecution
+    test "leaves a :compensating run with a fresh lock alone" do
       long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
 
-      live = insert_execution(workflow_name: "comp_live", status: :compensating)
+      live =
+        insert_execution(
+          workflow_name: "comp_live",
+          status: :compensating,
+          locked_by: "node_a",
+          locked_at: DateTime.utc_now()
+        )
 
       {1, _} =
         repo().update_all(
@@ -307,21 +444,60 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      # Insert an actively-running compensation step
-      {:ok, _step} =
-        %StepExecution{}
-        |> StepExecution.changeset(%{
-          workflow_id: live.id,
-          step_name: "comp_step",
-          step_type: "compensation",
-          attempt: 1,
-          status: :running
-        })
-        |> repo().insert()
+      insert_step(live, status: :running, is_compensation: true)
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 0
       assert repo().get!(WorkflowExecution, live.id).status == :compensating
+    end
+
+    test "fails a :compensating run whose lock went stale, running step or not (M-1)" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      zombie =
+        insert_execution(
+          workflow_name: "comp_killed",
+          status: :compensating,
+          locked_by: "gone",
+          locked_at: long_ago
+        )
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^zombie.id),
+          set: [updated_at: long_ago]
+        )
+
+      row = insert_step(zombie, status: :running, is_compensation: true)
+
+      {:ok, 1} = Postgres.recover_zombie_workflows(config(), 300)
+
+      assert repo().get!(WorkflowExecution, zombie.id).status == :failed
+      assert %{status: :failed} = repo().get!(StepExecution, row.id)
+    end
+
+    test "a compensating zombie isn't left with a time the sweep would roll it back at" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      # Claimed after a retry's backoff, which is still in scheduled_at.
+      zombie =
+        insert_execution(
+          workflow_name: "comp_killed_after_backoff",
+          status: :compensating,
+          locked_by: "gone",
+          locked_at: long_ago,
+          scheduled_at: long_ago
+        )
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^zombie.id),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, 1} = Postgres.recover_zombie_workflows(config(), 300)
+
+      assert %{status: :failed, scheduled_at: nil} = repo().get!(WorkflowExecution, zombie.id)
     end
 
     test "handles multiple zombies in a single sweep" do
@@ -339,7 +515,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 3
 
       for id <- zombies do
@@ -355,10 +531,10 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           workflow_name: "test",
           locked_by: "node_a",
           locked_at: DateTime.utc_now(),
-          status: :running
+          status: :completed
         )
 
-      :ok = @adapter.ack(config(), job.id)
+      :ok = Postgres.ack(config(), job.id)
 
       execution = repo().get!(WorkflowExecution, job.id)
       assert execution.locked_by == nil
@@ -374,11 +550,11 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           workflow_name: "test",
           locked_by: "node_a",
           locked_at: DateTime.utc_now(),
-          status: :running
+          status: :completed
         )
 
-      assert :ok = @adapter.ack(config(), job.id)
-      assert :ok = @adapter.ack(config(), job.id)
+      assert :ok = Postgres.ack(config(), job.id)
+      assert :ok = Postgres.ack(config(), job.id)
     end
   end
 
@@ -402,8 +578,8 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         )
 
       # Non-existent jobs return :not_found without firing telemetry.
-      assert {:error, :not_found} = @adapter.ack(config(), Ecto.UUID.generate())
-      refute_received {:ack_failed, ^ref, _, _}, 100
+      assert {:error, :not_found} = Postgres.ack(config(), Ecto.UUID.generate())
+      refute_receive {:ack_failed, ^ref, _, _}, 100
 
       :telemetry.detach("ack-failed-test-#{inspect(ref)}")
     end
@@ -411,7 +587,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
   describe "ack/2 not_found" do
     test "returns error for non-existent job" do
-      result = @adapter.ack(config(), Ecto.UUID.generate())
+      result = Postgres.ack(config(), Ecto.UUID.generate())
       assert result == {:error, :not_found}
     end
   end
@@ -426,7 +602,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      :ok = @adapter.nack(config(), job.id, %{message: "Something went wrong"})
+      :ok = Postgres.nack(config(), job.id, %{message: "Something went wrong"})
 
       execution = repo().get!(WorkflowExecution, job.id)
       assert execution.status == :failed
@@ -434,6 +610,19 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       assert execution.locked_by == nil
       assert execution.locked_at == nil
       assert execution.completed_at != nil
+    end
+
+    # The executor records a run's final status itself; nack is the fallback
+    # for a worker that crashed before it could. It must never overwrite a
+    # status the executor already settled (e.g. a saga that rolled back).
+    test "leaves a status the executor already settled alone" do
+      for settled <- [:compensated, :compensation_failed, :failed, :cancelled, :waiting] do
+        job = insert_execution(workflow_name: "test", status: settled)
+
+        :ok = Postgres.nack(config(), job.id, %{message: "worker saw an error"})
+
+        assert repo().get!(WorkflowExecution, job.id).status == settled
+      end
     end
   end
 
@@ -448,7 +637,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         )
 
       future = DateTime.add(DateTime.utc_now(), 3600, :second)
-      :ok = @adapter.reschedule(config(), job.id, future)
+      :ok = Postgres.reschedule(config(), job.id, future)
 
       execution = repo().get!(WorkflowExecution, job.id)
       assert execution.status == :pending
@@ -470,20 +659,20 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           status: :running
         )
 
-      :ok = @adapter.heartbeat(config(), job.id)
+      :ok = Postgres.heartbeat(config(), job.id)
 
       updated = repo().get!(WorkflowExecution, job.id)
       assert DateTime.compare(updated.locked_at, old_time) == :gt
     end
 
     test "returns error for non-existent job" do
-      result = @adapter.heartbeat(config(), Ecto.UUID.generate())
+      result = Postgres.heartbeat(config(), Ecto.UUID.generate())
       assert result == {:error, :not_found}
     end
 
     test "returns error for non-running job" do
       job = insert_execution(workflow_name: "pending_job", status: :pending)
-      result = @adapter.heartbeat(config(), job.id)
+      result = Postgres.heartbeat(config(), job.id)
       assert result == {:error, :not_found}
     end
   end
@@ -493,7 +682,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       insert_execution(workflow_name: "fence_a")
       insert_execution(workflow_name: "fence_b")
 
-      jobs = @adapter.fetch_jobs(config(), "default", 2, "node_a")
+      jobs = Postgres.fetch_jobs(config(), "default", 2, "node_a")
       assert length(jobs) == 2
 
       tokens = Enum.map(jobs, & &1.lock_token)
@@ -507,61 +696,72 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
     test "heartbeat: matching token refreshes; stale token is :fenced; no token is legacy-ok" do
       insert_execution(workflow_name: "fence_hb")
-      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
 
-      assert :ok = @adapter.heartbeat(config(), job.id, job.lock_token)
-      assert :ok = @adapter.heartbeat(config(), job.id)
+      assert :ok = Postgres.heartbeat(config(), job.id, job.lock_token)
+      assert :ok = Postgres.heartbeat(config(), job.id)
 
       # The row is :running with token A; a worker holding a different token has
       # been superseded → :fenced so it can abort instead of double-executing.
-      assert {:error, :fenced} = @adapter.heartbeat(config(), job.id, Ecto.UUID.generate())
+      assert {:error, :fenced} = Postgres.heartbeat(config(), job.id, Ecto.UUID.generate())
     end
 
     test "a finished row reports :not_found, not :fenced (no spurious abort on completion)" do
       insert_execution(workflow_name: "fence_done")
-      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
 
       repo().get!(WorkflowExecution, job.id)
       |> Ecto.Changeset.change(status: :completed)
       |> repo().update!()
 
-      assert {:error, :not_found} = @adapter.heartbeat(config(), job.id, job.lock_token)
+      assert {:error, :not_found} = Postgres.heartbeat(config(), job.id, job.lock_token)
     end
 
     test "ack with a stale token is a no-op; the real owner's ack releases the row" do
       insert_execution(workflow_name: "fence_ack")
-      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
 
-      assert :ok = @adapter.ack(config(), job.id, Ecto.UUID.generate())
+      assert :ok = Postgres.ack(config(), job.id, Ecto.UUID.generate())
       still = repo().get!(WorkflowExecution, job.id)
       assert still.status == :running
       assert still.locked_by == "node_a"
 
-      assert :ok = @adapter.ack(config(), job.id, job.lock_token)
+      # Still running, it keeps its lock: unlocked, no sweep would find it.
+      assert :ok = Postgres.ack(config(), job.id, job.lock_token)
+      assert repo().get!(WorkflowExecution, job.id).locked_by == "node_a"
+
+      repo().update_all(from(w in WorkflowExecution, where: w.id == ^job.id),
+        set: [status: :completed]
+      )
+
+      assert :ok = Postgres.ack(config(), job.id, Ecto.UUID.generate())
+      assert repo().get!(WorkflowExecution, job.id).locked_by == "node_a"
+
+      assert :ok = Postgres.ack(config(), job.id, job.lock_token)
       assert repo().get!(WorkflowExecution, job.id).locked_by == nil
     end
 
     test "nack with a stale token is a no-op" do
       insert_execution(workflow_name: "fence_nack")
-      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
 
-      assert :ok = @adapter.nack(config(), job.id, %{message: "boom"}, Ecto.UUID.generate())
+      assert :ok = Postgres.nack(config(), job.id, %{message: "boom"}, Ecto.UUID.generate())
       assert repo().get!(WorkflowExecution, job.id).status == :running
 
-      assert :ok = @adapter.nack(config(), job.id, %{message: "boom"}, job.lock_token)
+      assert :ok = Postgres.nack(config(), job.id, %{message: "boom"}, job.lock_token)
       assert repo().get!(WorkflowExecution, job.id).status == :failed
     end
 
     test "recover_stale_locks clears the lock_token so the fenced token can't re-match" do
       insert_execution(workflow_name: "fence_recover")
-      [job] = @adapter.fetch_jobs(config(), "default", 1, "node_a")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
       assert is_binary(job.lock_token)
 
       repo().get!(WorkflowExecution, job.id)
       |> Ecto.Changeset.change(locked_at: DateTime.add(DateTime.utc_now(), -600, :second))
       |> repo().update!()
 
-      {:ok, n} = @adapter.recover_stale_locks(config(), 300)
+      {:ok, n} = Postgres.recover_stale_locks(config(), 300)
       assert n >= 1
 
       recovered = repo().get!(WorkflowExecution, job.id)
@@ -578,7 +778,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       insert_execution(workflow_name: "completed", status: :completed)
       insert_execution(workflow_name: "failed", status: :failed)
 
-      stats = @adapter.get_stats(config(), "default")
+      stats = Postgres.get_stats(config(), "default")
 
       assert stats.queue == "default"
       assert stats.pending == 2
@@ -605,14 +805,14 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           locked_at: DateTime.add(DateTime.utc_now(), -120, :second)
         )
 
-      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 100)
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
       assert count == 1
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
       assert reloaded.status == :pending
       assert reloaded.locked_by == nil
       assert reloaded.locked_at == nil
-      assert reloaded.context["__sleep_satisfied__"] == "wait_step"
+      assert reloaded.engine_state["__sleep_satisfied__"] == "wait_step"
     end
 
     test "leaves :waiting rows whose scheduled_at is still in the future" do
@@ -626,7 +826,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           current_step: "wait_step"
         )
 
-      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 100)
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
@@ -641,7 +841,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           current_step: "await"
         )
 
-      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 100)
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, waiter.id)
@@ -665,11 +865,11 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [context: %{"customer_email" => "alice@example.com"}]
         )
 
-      {:ok, _count} = @adapter.wake_sleeping_workflows(config(), 100)
+      {:ok, _count} = Postgres.wake_sleeping_workflows(config(), 100)
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
       assert reloaded.context["customer_email"] == "alice@example.com"
-      assert reloaded.context["__sleep_satisfied__"] == "wait_step"
+      assert reloaded.engine_state["__sleep_satisfied__"] == "wait_step"
     end
 
     test "respects batch_size cap" do
@@ -684,7 +884,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
         )
       end
 
-      {:ok, count} = @adapter.wake_sleeping_workflows(config(), 2)
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 2)
       assert count == 2
     end
   end
@@ -710,12 +910,25 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           set: [updated_at: long_ago]
         )
 
-      {:ok, count} = @adapter.recover_zombie_workflows(config(), 300)
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
       assert count == 0
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
       assert reloaded.status == :waiting
     end
+  end
+
+  defp insert_step(run, opts) do
+    %StepExecution{}
+    |> StepExecution.changeset(%{
+      workflow_id: run.id,
+      step_name: Keyword.get(opts, :step_name, "work"),
+      step_type: "step",
+      attempt: 1,
+      status: Keyword.fetch!(opts, :status),
+      is_compensation: Keyword.get(opts, :is_compensation, false)
+    })
+    |> repo().insert!()
   end
 
   defp insert_execution(opts) do

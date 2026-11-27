@@ -18,6 +18,40 @@ defmodule Durable.ContextTest do
   # Context Key Handling Tests
   # ============================================================================
 
+  describe "a key named with an atom or a string" do
+    alias Durable.Context
+
+    setup do
+      Process.put(:durable_context, %{"id" => 42, "name" => "ada"})
+      on_exit(fn -> Process.delete(:durable_context) end)
+    end
+
+    test "is found whichever way it's asked for" do
+      assert Context.get_context(:id) == 42
+      assert Context.get_context("id") == 42
+      assert Context.get_context(:name) == "ada"
+      assert Context.get_context("name") == "ada"
+      assert Context.has_context?(:id)
+      refute Context.has_context?(:nope)
+      assert Context.get_context(:nope, :default) == :default
+    end
+
+    test "is written and deleted under the string, never beside it" do
+      Context.put_context(:id, 43)
+      assert Context.context() == %{"id" => 43, "name" => "ada"}
+
+      Context.delete_context(:id)
+      assert Context.context() == %{"name" => "ada"}
+    end
+
+    test "a new key is a string however it was named" do
+      Context.put_context(:fresh_key, 2)
+      Context.put_context(%{another: 3})
+      assert Context.context()["fresh_key"] == 2
+      assert Context.context()["another"] == 3
+    end
+  end
+
   describe "context key handling" do
     test "input with both string and atom versions of same key" do
       # When input has both :key and "key", atomization should handle this
@@ -136,6 +170,42 @@ defmodule Durable.ContextTest do
   end
 
   # ============================================================================
+  # Bug C-1 regression — put_context must persist across steps
+  # ============================================================================
+
+  describe "put_context persistence (Bug C-1 regression)" do
+    test "put_context writes persist to the next step without being in the return map" do
+      {:ok, execution} = create_and_execute_workflow(PutContextPersistWorkflow, %{})
+
+      assert execution.status == :completed
+      # Step 1 did put_context(:charge_id, "ch_1") but returned {:ok, %{step1_done: true}}.
+      # Step 2 read get_context(:charge_id) and stored it.
+      # Before the fix, Step 2 saw nil because save_data_as_context dropped
+      # the put_context write.
+      assert execution.context["seen_charge_id"] == "ch_1"
+      assert execution.context["step1_done"] == true
+    end
+
+    test "put_context writes persist across decision {:goto, ...}" do
+      {:ok, execution} = create_and_execute_workflow(PutContextGotoWorkflow, %{})
+
+      assert execution.status == :completed
+      # Step 1 put_context'd :prior, decision goto'd to :after_goto, which reads it.
+      # Before the fix, the goto's new_data replaced context wholesale and :prior vanished.
+      assert execution.context["saw_prior"] == "before_decision"
+    end
+
+    test "step return value wins over prior put_context on key collision" do
+      {:ok, execution} = create_and_execute_workflow(PutContextCollisionWorkflow, %{})
+
+      assert execution.status == :completed
+      # Step 1 did put_context(:mode, "from_ctx") then returned %{mode: "from_return"}.
+      # Step 2 reads :mode — step return should win.
+      assert execution.context["final_mode"] == "from_return"
+    end
+  end
+
+  # ============================================================================
   # Helper Functions
   # ============================================================================
 
@@ -173,11 +243,11 @@ defmodule MixedKeyInputWorkflow do
   use Durable.Helpers
 
   workflow "mixed_key_input" do
-    step(:process, fn data ->
+    step :process, fn data ->
       # Try to access the key - either atom or string version
-      result = data[:key] || data["key"]
+      result = data["key"]
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -186,12 +256,12 @@ defmodule NestedContextWorkflow do
   use Durable.Helpers
 
   workflow "nested_context" do
-    step(:extract, fn data ->
+    step :extract, fn data ->
       # Access nested data
-      user = data["user"] || data[:user]
-      profile = user["profile"] || user[:profile]
-      name = profile["name"] || profile[:name]
-      age = profile["age"] || profile[:age]
+      user = data["user"]
+      profile = user["profile"]
+      name = profile["name"]
+      age = profile["age"]
 
       data =
         data
@@ -199,7 +269,7 @@ defmodule NestedContextWorkflow do
         |> assign(:extracted_age, age)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -208,16 +278,16 @@ defmodule DeepNestedContextWorkflow do
   use Durable.Helpers
 
   workflow "deep_nested_context" do
-    step(:extract, fn data ->
+    step :extract, fn data ->
       # Navigate through 5 levels
-      l1 = data["level1"] || data[:level1]
-      l2 = l1["level2"] || l1[:level2]
-      l3 = l2["level3"] || l2[:level3]
-      l4 = l3["level4"] || l3[:level4]
-      l5 = l4["level5"] || l4[:level5]
+      l1 = data["level1"]
+      l2 = l1["level2"]
+      l3 = l2["level3"]
+      l4 = l3["level4"]
+      l5 = l4["level5"]
 
       {:ok, assign(data, :deep_value, l5)}
-    end)
+    end
   end
 end
 
@@ -226,7 +296,7 @@ defmodule LargeContextWorkflow do
   use Durable.Helpers
 
   workflow "large_context" do
-    step(:generate_large_data, fn data ->
+    step :generate_large_data, fn data ->
       # Generate ~100KB of data
       large_list =
         for i <- 1..1000,
@@ -237,7 +307,7 @@ defmodule LargeContextWorkflow do
             }
 
       {:ok, assign(data, :large_data, large_list)}
-    end)
+    end
   end
 end
 
@@ -246,13 +316,13 @@ defmodule PidUsageWorkflow do
   use Durable.Helpers
 
   workflow "pid_usage" do
-    step(:use_pid, fn data ->
+    step :use_pid, fn data ->
       # Use PID internally but don't store it
       pid = self()
       _info = Process.info(pid)
 
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -261,10 +331,10 @@ defmodule BinaryDataWorkflow do
   use Durable.Helpers
 
   workflow "binary_data" do
-    step(:store_binary, fn data ->
+    step :store_binary, fn data ->
       # Store a simple string (which is a binary in Elixir)
       {:ok, assign(data, :binary_data, "binary_content")}
-    end)
+    end
   end
 end
 
@@ -273,14 +343,14 @@ defmodule EmptyCollectionsWorkflow do
   use Durable.Helpers
 
   workflow "empty_collections" do
-    step(:store_empty, fn data ->
+    step :store_empty, fn data ->
       data =
         data
         |> assign(:empty_map, %{})
         |> assign(:empty_list, [])
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -289,10 +359,10 @@ defmodule SpecialCharsContextWorkflow do
   use Durable.Helpers
 
   workflow "special_chars_context" do
-    step(:preserve, fn data ->
+    step :preserve, fn data ->
       text = data["text"]
       {:ok, assign(data, :preserved, text)}
-    end)
+    end
   end
 end
 
@@ -301,10 +371,10 @@ defmodule UnicodeContextWorkflow do
   use Durable.Helpers
 
   workflow "unicode_context" do
-    step(:preserve, fn data ->
+    step :preserve, fn data ->
       text = data["text"]
       {:ok, assign(data, :preserved, text)}
-    end)
+    end
   end
 end
 
@@ -313,7 +383,7 @@ defmodule NumericContextWorkflow do
   use Durable.Helpers
 
   workflow "numeric_context" do
-    step(:store_numbers, fn data ->
+    step :store_numbers, fn data ->
       data =
         data
         |> assign(:integer, 42)
@@ -322,6 +392,73 @@ defmodule NumericContextWorkflow do
         |> assign(:zero, 0)
 
       {:ok, data}
-    end)
+    end
+  end
+end
+
+# ============================================================================
+# Bug C-1 regression fixtures
+# ============================================================================
+
+defmodule PutContextPersistWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "put_context_persist" do
+    step :step1, fn _data ->
+      # Write to context via put_context — it should persist to the next step
+      # EVEN THOUGH the step's return map doesn't include :charge_id.
+      put_context(:charge_id, "ch_1")
+      {:ok, %{step1_done: true}}
+    end
+
+    step :step2, fn _data ->
+      # Before the fix, get_context(:charge_id) returned nil here.
+      {:ok, %{seen_charge_id: get_context(:charge_id)}}
+    end
+  end
+end
+
+defmodule PutContextGotoWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "put_context_goto" do
+    step :step1, fn _data ->
+      put_context(:prior, "before_decision")
+      {:ok, %{step1_done: true}}
+    end
+
+    decision :decide, fn data ->
+      # Goto new_data deliberately does NOT include :prior —
+      # the fix should preserve it via the process-dict merge.
+      {:goto, :after_goto, Map.drop(data, [:prior, "prior"])}
+    end
+
+    step :skipped, fn _data -> {:ok, %{should_not_run: true}} end
+
+    step :after_goto, fn _data ->
+      {:ok, %{saw_prior: get_context(:prior)}}
+    end
+  end
+end
+
+defmodule PutContextCollisionWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "put_context_collision" do
+    step :step1, fn _data ->
+      put_context(:mode, "from_ctx")
+      # Step return has the same key — return value MUST win on collision.
+      {:ok, %{mode: "from_return"}}
+    end
+
+    step :step2, fn _data ->
+      {:ok, %{final_mode: get_context(:mode)}}
+    end
   end
 end

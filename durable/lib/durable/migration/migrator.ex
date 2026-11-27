@@ -6,7 +6,6 @@ defmodule Durable.Migration.Migrator do
   use Ecto.Migration
 
   alias Durable.Migration.SchemaMigration
-  alias Durable.Storage.Dialect
   alias Ecto.Migration.Runner
 
   require Logger
@@ -17,13 +16,19 @@ defmodule Durable.Migration.Migrator do
     Durable.Migration.Migrations.V20260103000000InitialSchema,
     Durable.Migration.Migrations.V20260104000000AddWaitPrimitives,
     Durable.Migration.Migrations.V20260413000000AddSchedulerResilience,
-    Durable.Migration.Migrations.V20260609000000AddStepExecutionSessionId,
     Durable.Migration.Migrations.V20260623000000AddLockFencing,
     Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink,
-    Durable.Migration.Migrations.V20260718000000AddWorkflowRetryMetadata,
-    Durable.Migration.Migrations.V20260719000000AddPendingEventTimeoutMode,
-    Durable.Migration.Migrations.V20260723000000HardenPendingEventUniqueness,
-    Durable.Migration.Migrations.V20261006000000AddIdempotentWorkflowStart
+    Durable.Migration.Migrations.V20261016000000AddOperatorControls,
+    Durable.Migration.Migrations.V20261016000001AddDeadlinesAndHistory,
+    Durable.Migration.Migrations.V20261106000000AddWorkflowKeys,
+    Durable.Migration.Migrations.V20261107000000AddScheduleKeysAndTags,
+    Durable.Migration.Migrations.V20261109000000AddClaimIndex,
+    Durable.Migration.Migrations.V20261110000000AddReadyOrderAndScheduleSource,
+    Durable.Migration.Migrations.V20261111000000AddRootWorkflowId,
+    Durable.Migration.Migrations.V20261122000000AddEngineState,
+    Durable.Migration.Migrations.V20261124000000AddKeptLockIndex,
+    Durable.Migration.Migrations.V20261124000001AddNodeClockSkew,
+    Durable.Migration.Migrations.V20261125000000AddKeyScopes
   ]
 
   @doc """
@@ -77,14 +82,13 @@ defmodule Durable.Migration.Migrator do
   """
   @spec up(keyword()) :: :ok
   def up(opts \\ []) do
+    prefix = Keyword.get(opts, :prefix, "durable")
     log_level = Keyword.get(opts, :log, :info)
     target_version = Keyword.get(opts, :to)
     repo = Runner.repo()
-    # SQLite has no schemas: the prefix resolves to nil there.
-    prefix = Dialect.prefix(repo, Keyword.get(opts, :prefix, "durable"))
 
     # Ensure schema exists (use direct query, not deferred execute)
-    if prefix, do: repo.query!("CREATE SCHEMA IF NOT EXISTS #{prefix}", [])
+    repo.query!("CREATE SCHEMA IF NOT EXISTS #{prefix}", [])
 
     # Ensure schema_migrations table exists
     SchemaMigration.ensure_table!(prefix)
@@ -128,7 +132,7 @@ defmodule Durable.Migration.Migrator do
   """
   @spec down(keyword()) :: :ok
   def down(opts \\ []) do
-    prefix = Dialect.prefix(Runner.repo(), Keyword.get(opts, :prefix, "durable"))
+    prefix = Keyword.get(opts, :prefix, "durable")
     log_level = Keyword.get(opts, :log, :info)
     target_version = Keyword.get(opts, :to)
     step = Keyword.get(opts, :step)
@@ -172,11 +176,8 @@ defmodule Durable.Migration.Migrator do
 
     if remaining == [] do
       SchemaMigration.drop_table(prefix)
-
-      if prefix do
-        execute("DROP SCHEMA IF EXISTS #{prefix} CASCADE")
-        log(log_level, "Durable: Dropped schema #{prefix}")
-      end
+      execute("DROP SCHEMA IF EXISTS #{prefix} CASCADE")
+      log(log_level, "Durable: Dropped schema #{prefix}")
     end
   end
 

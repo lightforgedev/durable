@@ -51,7 +51,7 @@ defmodule Durable.Supervisor do
 
   alias Durable.Config
   alias Durable.LogCapture.Handler
-  alias Durable.Storage.Dialect
+  alias Durable.Queue.Drainer
 
   @doc """
   Starts the Durable supervisor.
@@ -60,7 +60,6 @@ defmodule Durable.Supervisor do
 
   * `:repo` - The Ecto repo module (required)
   * `:name` - Instance name (default: `Durable`)
-  * `:prefix` - Database schema prefix (default: `"durable"`)
   * `:queues` - Queue configuration
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
 
@@ -80,6 +79,20 @@ defmodule Durable.Supervisor do
     end
   end
 
+  # A lock has to survive a few missed heartbeats, or healthy steps get taken
+  # over and run twice. One setting is in ms and the other in seconds.
+  defp warn_if_heartbeat_too_slow(%Config{queue_enabled: false}), do: :ok
+
+  defp warn_if_heartbeat_too_slow(%Config{} = config) do
+    if config.heartbeat_interval * 3 > config.stale_lock_timeout * 1_000 do
+      Logger.warning(
+        "[Durable] heartbeat_interval is #{config.heartbeat_interval} ms and " <>
+          "stale_lock_timeout is #{config.stale_lock_timeout} s. Keep the timeout at " <>
+          "least 3 heartbeats long, or healthy steps will be taken over and run twice."
+      )
+    end
+  end
+
   @doc """
   Returns the supervisor name for a Durable instance.
   """
@@ -90,7 +103,8 @@ defmodule Durable.Supervisor do
 
   @impl true
   def init(%Config{} = config) do
-    :ok = Dialect.validate!(config.repo)
+    Drainer.reset(config.name)
+    warn_if_heartbeat_too_slow(config)
 
     # Attach log capture handler (idempotent)
     :ok = Handler.attach()
@@ -106,7 +120,15 @@ defmodule Durable.Supervisor do
         []
       end
 
-    base_children = pubsub_children ++ [{Task.Supervisor, name: task_sup_name}]
+    base_children =
+      pubsub_children ++
+        [
+          {Task.Supervisor, name: task_sup_name},
+          {Durable.NodeRegistry, config: config},
+          {Durable.Queue.Sampler, config: config}
+        ] ++
+        if(config.pubsub, do: [{Durable.Queue.CommitWaker, config}], else: []) ++
+        if(config.prune, do: [{Durable.Pruner, config: config}], else: [])
 
     children =
       if config.queue_enabled do

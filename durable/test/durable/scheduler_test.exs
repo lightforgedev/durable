@@ -12,7 +12,7 @@ defmodule Durable.SchedulerTest do
 
   alias Durable.Config
   alias Durable.Scheduler.API
-  alias Durable.Storage.Schemas.ScheduledWorkflow
+  alias Durable.Storage.Schemas.{ScheduledWorkflow, WorkflowExecution}
 
   # ============================================================================
   # Test Workflows
@@ -23,12 +23,43 @@ defmodule Durable.SchedulerTest do
     use Durable.Helpers
 
     workflow "simple" do
-      step(:do_work, fn data ->
+      step :do_work, fn data ->
         {:ok,
          data
          |> assign(:executed, true)
          |> assign(:executed_at, DateTime.utc_now())}
-      end)
+      end
+    end
+  end
+
+  defmodule RefusesDuplicates do
+    use Durable
+    use Durable.Helpers
+
+    workflow "refuses_duplicates", on_duplicate: :error do
+      step :do_work, fn data -> {:ok, data} end
+    end
+  end
+
+  defmodule KeyedSchedule do
+    use Durable
+    use Durable.Helpers
+    use Durable.Scheduler.DSL
+
+    @schedule cron: "*/5 * * * *", key: "cleanup"
+    workflow "keyed_cleanup" do
+      step :do_work, fn data -> {:ok, data} end
+    end
+  end
+
+  defmodule BlankKeySchedule do
+    use Durable
+    use Durable.Helpers
+    use Durable.Scheduler.DSL
+
+    @schedule cron: "*/5 * * * *", key: " "
+    workflow "blank_key_cleanup" do
+      step :do_work, fn data -> {:ok, data} end
     end
   end
 
@@ -37,15 +68,15 @@ defmodule Durable.SchedulerTest do
     use Durable.Helpers
 
     workflow "workflow_a" do
-      step(:a, fn data ->
+      step :a, fn data ->
         {:ok, assign(data, :workflow, "a")}
-      end)
+      end
     end
 
     workflow "workflow_b" do
-      step(:b, fn data ->
+      step :b, fn data ->
         {:ok, assign(data, :workflow, "b")}
-      end)
+      end
     end
   end
 
@@ -56,22 +87,22 @@ defmodule Durable.SchedulerTest do
 
     @schedule cron: "0 9 * * *", timezone: "UTC"
     workflow "daily_report" do
-      step(:generate, fn data ->
+      step :generate, fn data ->
         {:ok, assign(data, :generated, true)}
-      end)
+      end
     end
 
     @schedule cron: "0 */6 * * *", queue: :reports
     workflow "periodic_report" do
-      step(:generate_periodic, fn data ->
+      step :generate_periodic, fn data ->
         {:ok, assign(data, :type, "periodic")}
-      end)
+      end
     end
 
     workflow "unscheduled" do
-      step(:work, fn data ->
+      step :work, fn data ->
         {:ok, assign(data, :unscheduled, true)}
-      end)
+      end
     end
   end
 
@@ -84,7 +115,7 @@ defmodule Durable.SchedulerTest do
       {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *")
 
       assert schedule.name == "simple"
-      assert schedule.workflow_module == Atom.to_string(SimpleWorkflow)
+      assert schedule.workflow_module == "Durable.SchedulerTest.SimpleWorkflow"
       assert schedule.workflow_name == "simple"
       assert schedule.cron_expression == "0 9 * * *"
       assert schedule.timezone == "UTC"
@@ -137,7 +168,7 @@ defmodule Durable.SchedulerTest do
         )
 
       # Input is stored as-is (atom keys preserved in schedule record)
-      assert schedule.input == %{key: "value"}
+      assert schedule.input == %{"key" => "value"}
     end
 
     test "creates schedule with queue" do
@@ -211,26 +242,26 @@ defmodule Durable.SchedulerTest do
     end
 
     test "lists all schedules" do
-      schedules = Durable.list_schedules()
+      schedules = Durable.list_schedules!()
 
       assert length(schedules) >= 3
     end
 
     test "filters by enabled status" do
-      schedules = Durable.list_schedules(enabled: true)
+      schedules = Durable.list_schedules!(enabled: true)
 
       refute Enum.any?(schedules, &(&1.name == "list_schedule_2"))
     end
 
     test "filters by queue" do
-      schedules = Durable.list_schedules(queue: :reports)
+      schedules = Durable.list_schedules!(queue: :reports)
 
       assert Enum.any?(schedules, &(&1.name == "list_schedule_3"))
       refute Enum.any?(schedules, &(&1.name == "list_schedule_1"))
     end
 
     test "respects limit" do
-      schedules = Durable.list_schedules(limit: 1)
+      schedules = Durable.list_schedules!(limit: 1)
 
       assert length(schedules) == 1
     end
@@ -264,9 +295,9 @@ defmodule Durable.SchedulerTest do
     test "updates timezone" do
       {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "update_tz_test")
 
-      {:ok, updated} = Durable.update_schedule("update_tz_test", timezone: "Europe/London")
+      {:ok, updated} = Durable.update_schedule("update_tz_test", timezone: "Etc/UTC")
 
-      assert updated.timezone == "Europe/London"
+      assert updated.timezone == "Etc/UTC"
     end
 
     test "updates enabled status" do
@@ -324,12 +355,118 @@ defmodule Durable.SchedulerTest do
       assert schedule.next_run_at != nil
     end
 
+    test "re-enables an every-minute schedule (whole-second next run)" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "* * * * *", name: "minutely", enabled: false)
+
+      assert {:ok, %{enabled: true, next_run_at: next}} = Durable.enable_schedule("minutely")
+      assert next.second == 0
+      assert {:ok, %{enabled: false}} = Durable.disable_schedule("minutely")
+      assert {:ok, %{enabled: true}} = Durable.enable_schedule("minutely")
+    end
+
+    test "upcoming_runs lists the next fire times in UTC" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "nine")
+      {:ok, schedule} = Durable.get_schedule("nine")
+
+      [first, second, third] = API.upcoming_runs!(schedule, 3)
+
+      assert DateTime.compare(first, DateTime.utc_now()) == :gt
+      assert {first.hour, first.minute} == {9, 0}
+      assert DateTime.diff(second, first, :hour) == 24
+      assert DateTime.diff(third, second, :hour) == 24
+    end
+
     test "disables an enabled schedule" do
       {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "disable_test")
 
       {:ok, schedule} = Durable.disable_schedule("disable_test")
 
       assert schedule.enabled == false
+    end
+  end
+
+  describe "schedules with a key" do
+    setup do
+      start_supervised!(
+        {Durable.Scheduler, config: Config.get(Durable), interval: :timer.hours(1)}
+      )
+
+      :ok
+    end
+
+    defp fire(name) do
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      schedule = TestRepo.get_by!(ScheduledWorkflow, name: name)
+      TestRepo.update!(Ecto.Changeset.change(schedule, next_run_at: past))
+      Durable.Scheduler.check_schedules()
+      # A call after the cast returns once the check has run.
+      Durable.Scheduler.status()
+      TestRepo.get_by!(ScheduledWorkflow, name: name)
+    end
+
+    defp runs(workflow_name) do
+      TestRepo.all(from(w in WorkflowExecution, where: w.workflow_name == ^workflow_name))
+    end
+
+    test "a fire while the last run holds the key starts nothing" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "* * * * *", name: "keyed", key: "cleanup")
+
+      fire("keyed")
+      assert [%{key: "cleanup", trigger: :schedule}] = runs("simple")
+
+      fire("keyed")
+      assert [_] = runs("simple")
+
+      assert TestRepo.exists?(
+               from(a in "activity", prefix: "durable", where: a.kind == "key_duplicate")
+             )
+    end
+
+    test "a fire refused by on_duplicate: :error is skipped, not a failure" do
+      {:ok, _} =
+        Durable.schedule(RefusesDuplicates, "* * * * *", name: "refused", key: "only-one")
+
+      fire("refused")
+      schedule = fire("refused")
+
+      assert [_] = runs("refuses_duplicates")
+      assert schedule.consecutive_failures == 0
+      assert DateTime.after?(schedule.next_run_at, DateTime.utc_now())
+    end
+
+    test "trigger_schedule/2 and @schedule take the key too" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "keyed_trigger", key: "k1")
+      {:ok, id} = Durable.trigger_schedule("keyed_trigger")
+      assert {:ok, %{key: "k1"}} = Durable.get_execution(id)
+
+      assert [%{key: "cleanup"}] = KeyedSchedule.__schedules__()
+      :ok = API.register(KeyedSchedule)
+      assert {:ok, %{key: "cleanup"}} = Durable.get_schedule("keyed_cleanup")
+    end
+
+    # A blank key was saved as none, so each fire started a run beside the
+    # last; one a start refuses was saved, and failed every fire, or raised.
+    test "a schedule's key is checked as a start's is, and a blank one is kept" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "blank_key", key: " ")
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key")
+      {:ok, id} = Durable.trigger_schedule("blank_key")
+      assert {:ok, %{key: " "}} = Durable.get_execution(id)
+
+      for key <- ["", String.duplicate("k", 256), "a\0b", <<0xFF>>] do
+        assert {:error, %Ecto.Changeset{}} =
+                 Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "bad_key", key: key)
+
+        assert {:error, %Ecto.Changeset{}} = Durable.update_schedule("blank_key", key: key)
+      end
+
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key")
+
+      # @schedule, registered new and then over a changed record.
+      :ok = API.register(BlankKeySchedule)
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key_cleanup")
+      {:ok, _} = Durable.update_schedule("blank_key_cleanup", key: "other")
+      :ok = API.register(BlankKeySchedule)
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key_cleanup")
     end
   end
 
@@ -458,6 +595,188 @@ defmodule Durable.SchedulerTest do
     end
   end
 
+  describe "a @schedule that changed" do
+    defp next_run_within?(schedule, seconds) do
+      DateTime.diff(schedule.next_run_at, DateTime.utc_now(), :second) <= seconds
+    end
+
+    test "a new cron takes effect now, not after the old next_run_at has fired" do
+      {:ok, _} =
+        Durable.schedule(ScheduledWorkflowModule, "0 0 1 1 *",
+          name: "daily_report",
+          workflow: "daily_report"
+        )
+
+      {:ok, before} = Durable.get_schedule("daily_report")
+      refute next_run_within?(before, 3 * 86_400) and before.next_run_at.month != 1
+
+      :ok = API.register(ScheduledWorkflowModule)
+
+      {:ok, daily} = Durable.get_schedule("daily_report")
+      assert next_run_within?(daily, 86_400)
+    end
+
+    test "an unchanged schedule keeps its next_run_at" do
+      :ok = API.register(ScheduledWorkflowModule)
+      {:ok, first} = Durable.get_schedule("daily_report")
+
+      far = DateTime.add(first.next_run_at, 7, :day)
+      {:ok, _} = Durable.update_schedule("daily_report", next_run_at_for_test(far))
+
+      :ok = API.register(ScheduledWorkflowModule)
+      {:ok, second} = Durable.get_schedule("daily_report")
+      assert DateTime.compare(second.next_run_at, far) == :eq
+    end
+
+    test "update_schedule/2 recomputes next_run_at for a new time zone alone" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "tz")
+      {:ok, moved} = Durable.get_schedule("tz")
+
+      far = DateTime.add(moved.next_run_at, 30, :day)
+
+      Config.get(Durable).repo.update_all(from(s in ScheduledWorkflow, where: s.id == ^moved.id),
+        set: [next_run_at: far]
+      )
+
+      {:ok, updated} = Durable.update_schedule("tz", timezone: "Etc/UTC")
+      assert next_run_within?(updated, 86_400)
+    end
+
+    # A fire due now that the scheduler's next check hasn't come to yet.
+    defp due_now!(name) do
+      due = DateTime.add(DateTime.utc_now(), -5, :second)
+
+      Config.get(Durable).repo.update_all(from(s in ScheduledWorkflow, where: s.name == ^name),
+        set: [next_run_at: due]
+      )
+
+      due
+    end
+
+    defp fires_due!(name, due) do
+      config = Config.get(Durable)
+      assert [%{name: ^name} = schedule] = API.get_due_schedules(config)
+      assert DateTime.compare(schedule.next_run_at, due) == :eq
+      assert API.claim_fire(schedule, config)
+    end
+
+    test "update_schedule/2 with a new cron keeps the fire that's due now" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "due_edit")
+      due = due_now!("due_edit")
+
+      {:ok, _} = Durable.update_schedule("due_edit", cron: "30 9 * * *")
+      fires_due!("due_edit", due)
+
+      # The fire after it goes by the new cron.
+      {:ok, fired} = Durable.get_schedule("due_edit")
+      assert %{hour: 9, minute: 30} = fired.next_run_at
+    end
+
+    test "a new cron in code keeps the fire that's due now" do
+      {:ok, _} =
+        Durable.schedule(ScheduledWorkflowModule, "0 0 1 1 *",
+          name: "daily_report",
+          workflow: "daily_report"
+        )
+
+      due = due_now!("daily_report")
+      :ok = API.register(ScheduledWorkflowModule)
+      fires_due!("daily_report", due)
+    end
+
+    test "a schedule turned back on doesn't fire the time it missed while off" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "off_edit")
+      {:ok, _} = Durable.disable_schedule("off_edit")
+      due_now!("off_edit")
+
+      {:ok, back} = Durable.update_schedule("off_edit", enabled: true, cron: "30 9 * * *")
+      assert DateTime.after?(back.next_run_at, DateTime.utc_now())
+    end
+
+    defp next_run_at_for_test(at) do
+      Config.get(Durable).repo.update_all(
+        from(s in ScheduledWorkflow, where: s.name == "daily_report"),
+        set: [next_run_at: at]
+      )
+
+      []
+    end
+  end
+
+  describe "a @schedule removed from the code" do
+    defp declared_row(name, module \\ ScheduledWorkflowModule) do
+      {:ok, schedule} =
+        Durable.schedule(module, "0 9 * * *", name: name, workflow: hd(module.__workflows__()))
+
+      {:ok, schedule} =
+        schedule |> Ecto.Changeset.change(source: "code") |> Config.get(Durable).repo.update()
+
+      schedule
+    end
+
+    test "is turned off; what's still declared stays on" do
+      :ok = API.register(ScheduledWorkflowModule)
+      declared_row("deleted_from_the_module")
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+
+      {:ok, removed} = Durable.get_schedule("deleted_from_the_module")
+      assert removed.enabled == false
+
+      {:ok, kept} = Durable.get_schedule("daily_report")
+      assert kept.enabled == true
+    end
+
+    test "leaves schedules made with Durable.schedule/3 alone" do
+      {:ok, _} =
+        Durable.schedule(ScheduledWorkflowModule, "0 9 * * *",
+          name: "made_at_runtime",
+          workflow: "daily_report"
+        )
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+
+      {:ok, schedule} = Durable.get_schedule("made_at_runtime")
+      assert schedule.enabled == true
+    end
+
+    test "leaves another module's schedules alone: a node only speaks for its own" do
+      declared_row("someone_elses", SimpleWorkflow)
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+
+      {:ok, schedule} = Durable.get_schedule("someone_elses")
+      assert schedule.enabled == true
+    end
+
+    test "comes back on, with a fresh next_run_at, if it's declared again" do
+      :ok = API.register(ScheduledWorkflowModule)
+
+      Config.get(Durable).repo.update_all(
+        from(s in ScheduledWorkflow, where: s.name == "daily_report"),
+        set: [source: "removed", enabled: false, next_run_at: nil]
+      )
+
+      :ok = API.register(ScheduledWorkflowModule)
+
+      {:ok, daily} = Durable.get_schedule("daily_report")
+      assert daily.enabled == true
+      assert daily.source == "code"
+      assert daily.next_run_at != nil
+    end
+
+    test "a schedule an operator turned off stays off" do
+      :ok = API.register(ScheduledWorkflowModule)
+      {:ok, _} = Durable.disable_schedule("daily_report")
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+      :ok = API.register(ScheduledWorkflowModule)
+
+      {:ok, daily} = Durable.get_schedule("daily_report")
+      assert daily.enabled == false
+    end
+  end
+
   describe "register_all/1" do
     test "registers multiple modules" do
       :ok = API.register_all([ScheduledWorkflowModule])
@@ -552,23 +871,53 @@ defmodule Durable.SchedulerTest do
     end
   end
 
-  describe "mark_run/2" do
-    test "updates last_run_at and sets next_run_at in future" do
+  describe "claim_fire/2" do
+    test "moves the schedule on, once" do
       config = Config.get(Durable)
 
-      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "mark_run_test")
-
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_test")
       assert schedule.last_run_at == nil
 
-      {:ok, updated} = API.mark_run(schedule, config)
+      # Due, as only a due schedule gets here: the next time is a different one.
+      {:ok, schedule} =
+        schedule
+        |> Ecto.Changeset.change(next_run_at: DateTime.add(DateTime.utc_now(), -5, :second))
+        |> config.repo.update()
 
-      # last_run_at should be set to approximately now
-      assert updated.last_run_at != nil
-      diff = DateTime.diff(DateTime.utc_now(), updated.last_run_at, :second)
-      assert diff >= 0 and diff < 5
+      assert API.claim_fire(schedule, config)
 
-      # next_run_at should be in the future relative to last_run_at
+      {:ok, updated} = Durable.get_schedule("claim_test")
+      assert DateTime.diff(Durable.Clock.utc_now(), updated.last_run_at, :second) in 0..4
       assert DateTime.compare(updated.next_run_at, updated.last_run_at) == :gt
+
+      # A second node that read the same row loses.
+      refute API.claim_fire(schedule, config)
+    end
+
+    test "loses to an operator's edit since it was read, and the fire waits for the next check" do
+      config = Config.get(Durable)
+
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_edit")
+
+      {:ok, read} =
+        schedule
+        |> Ecto.Changeset.change(next_run_at: DateTime.add(DateTime.utc_now(), -5, :second))
+        |> config.repo.update()
+
+      {:ok, _} = Durable.update_schedule("claim_edit", cron: "30 9 * * *", input: %{"v" => 2})
+      refute API.claim_fire(read, config)
+
+      assert [%{name: "claim_edit", input: %{"v" => 2}} = edited] = API.get_due_schedules(config)
+      assert API.claim_fire(edited, config)
+    end
+
+    test "loses to an operator who turned the schedule off" do
+      config = Config.get(Durable)
+
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_off")
+      {:ok, _} = Durable.disable_schedule("claim_off")
+
+      refute API.claim_fire(schedule, config)
     end
   end
 
@@ -608,7 +957,8 @@ defmodule Durable.SchedulerTest do
           input: complex_input
         )
 
-      assert schedule.input == complex_input
+      # As it is stored: the schedule that comes back is the row.
+      assert schedule.input == complex_input |> Jason.encode!() |> Jason.decode!()
     end
 
     test "schedule with cron every minute" do

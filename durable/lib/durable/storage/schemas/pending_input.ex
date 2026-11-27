@@ -9,6 +9,8 @@ defmodule Durable.Storage.Schemas.PendingInput do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Durable.Clock
+
   @type input_type :: :form | :single_choice | :multi_choice | :free_text | :approval
 
   @type status :: :pending | :completed | :timeout | :cancelled
@@ -38,8 +40,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
-  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
+  @schema_prefix "durable"
   schema "pending_inputs" do
     field(:input_name, :string)
     field(:step_name, :string)
@@ -58,11 +59,11 @@ defmodule Durable.Storage.Schemas.PendingInput do
       default: :pending
     )
 
-    field(:response, :map)
+    field(:response, Durable.Storage.JsonMap)
     field(:timeout_at, :utc_datetime_usec)
     field(:timeout_value, :map)
     field(:on_timeout, Ecto.Enum, values: [:resume, :fail], default: :resume)
-    field(:metadata, :map)
+    field(:metadata, Durable.Storage.JsonMap)
     field(:completed_at, :utc_datetime_usec)
 
     # For parallel/foreach context
@@ -72,7 +73,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_id, :input_name, :step_name]
@@ -112,7 +113,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
       %{
         status: :completed,
         response: response,
-        completed_at: DateTime.utc_now()
+        completed_at: Clock.utc_now()
       },
       [:status, :response, :completed_at]
     )
@@ -123,7 +124,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
   """
   def timeout_changeset(pending_input) do
     pending_input
-    |> cast(%{status: :timeout, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :timeout, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 
   @doc """
@@ -131,6 +132,6 @@ defmodule Durable.Storage.Schemas.PendingInput do
   """
   def cancel_changeset(pending_input) do
     pending_input
-    |> cast(%{status: :cancelled, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :cancelled, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 end

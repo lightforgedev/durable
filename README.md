@@ -1,4 +1,24 @@
-# Durable workspace
+# Durable
+
+[![CI](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
+[![durable on Hex](https://img.shields.io/hexpm/v/durable.svg?label=durable)](https://hex.pm/packages/durable)
+[![durable_dashboard on Hex](https://img.shields.io/hexpm/v/durable_dashboard.svg?label=durable_dashboard)](https://hex.pm/packages/durable_dashboard)
+[![Docs](https://img.shields.io/badge/docs-durable.wavezync.com-ffc27a)](https://durable.wavezync.com/docs/)
+[![License](https://img.shields.io/hexpm/l/durable.svg)](LICENSE)
+
+Durable, reliable, resumable workflows for Elixir. Write workflows as plain
+steps; every step is saved, so runs resume after crashes, deploys and long
+waits.
+
+- **Docs, guides and interactive examples:** [durable.wavezync.com](https://durable.wavezync.com)
+- **API reference:** [durable](https://hexdocs.pm/durable) and [durable_dashboard](https://hexdocs.pm/durable_dashboard) on HexDocs
+
+## Project docs
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): how Durable works, and the rules to keep
+- [PLAN.md](PLAN.md): what's next
+
+## Workspace
 
 This is a path-dep monorepo (pnpm-workspaces style) containing the Durable
 workflow engine and its surrounding packages. Each subdirectory is an
@@ -7,11 +27,12 @@ publishing pipeline.
 
 ## Packages
 
-| Path | Package | Description |
-| --- | --- | --- |
-| [`durable/`](durable/) | `:durable` | Core workflow engine — resumable, reliable workflows with PostgreSQL persistence. |
-| [`durable_dashboard/`](durable_dashboard/) | `:durable_dashboard` | LiveView-first web dashboard for monitoring and managing Durable workflows. |
-| [`examples/phoenix_demo/`](examples/phoenix_demo/) | (unpublished) | Reference Phoenix app wiring up `:durable` and `:durable_dashboard`. |
+| Path | Package | Version | Docs | Description |
+| --- | --- | --- | --- | --- |
+| [`durable/`](durable/) | `:durable` | [![Hex](https://img.shields.io/hexpm/v/durable.svg)](https://hex.pm/packages/durable) | [HexDocs](https://hexdocs.pm/durable) | Core workflow engine — resumable, reliable workflows with PostgreSQL persistence. |
+| [`durable_dashboard/`](durable_dashboard/) | `:durable_dashboard` | [![Hex](https://img.shields.io/hexpm/v/durable_dashboard.svg)](https://hex.pm/packages/durable_dashboard) | [HexDocs](https://hexdocs.pm/durable_dashboard) | LiveView-first web dashboard for monitoring and managing Durable workflows. |
+| [`examples/phoenix_demo/`](examples/phoenix_demo/) | (unpublished) | | | Reference Phoenix app wiring up `:durable` and `:durable_dashboard`. |
+| [`site/`](site/) | (unpublished) | | [durable.wavezync.com](https://durable.wavezync.com) | [durable.wavezync.com](https://durable.wavezync.com): Astro site. Its docs are the packages' own markdown, read in place (`site/src/docs.ts`). `cd site && pnpm install && pnpm dev` |
 
 ## Workspace commands
 
@@ -37,14 +58,39 @@ commands work: `mix deps.get`, `mix compile`, `mix test`, `mix format`,
 
 ## Cross-package references
 
-Packages link to each other via `path:` deps in dev. To publish, swap the
-`path:` line for the Hex version:
+`durable_dashboard` depends on `{:durable, "~> 2.0"}` from Hex, which is what
+it ships with. To build it against the local checkout, set `DURABLE_PATH`:
 
-```elixir
-# durable_dashboard/mix.exs
-{:durable, path: "../durable"}      # dev
-{:durable, "~> 0.1"}                # release
+```bash
+cd durable_dashboard && DURABLE_PATH=../durable mix test
 ```
+
+The workspace commands and CI set it for you.
+
+## Releasing
+
+Each package is released on its own from GitHub Actions: **Actions → Release →
+Run workflow**, then pick the package. Leave the version blank to take the
+next one [git-cliff](https://git-cliff.org) derives from the package's
+conventional commits since its last tag, or enter one. The workflow:
+
+1. bumps `@version`, regenerates the package's `CHANGELOG.md` (config in
+   [`cliff.toml`](cliff.toml)), commits both to `main`, and tags
+   `durable-v<version>` or `durable_dashboard-v<version>`;
+2. publishes to Hex with the `HEX_API_KEY` repository secret;
+3. creates the GitHub release, with that version's changelog as its notes.
+
+If publishing fails, run Release again with the same version: it reuses the
+tag and skips whatever already went out. Release
+`durable` first when the dashboard needs its changes: the dashboard is
+published against durable from Hex.
+
+Releases publish their HexDocs too. To fix docs without a release, run
+**Actions → Docs**: it republishes a package's docs from `main` under its
+current version.
+
+Preview a changelog locally with
+`git cliff --include-path "durable/**" --tag-pattern "^durable-v" --unreleased`.
 
 ## Database
 

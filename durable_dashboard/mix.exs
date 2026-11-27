@@ -16,7 +16,7 @@ defmodule DurableDashboard.MixProject do
   {shared, _bindings} = Code.eval_file(shared_dst)
 
   # Versioned independently of durable.
-  @version "0.1.0-rc"
+  @version "2.1.1"
 
   @elixir_requirement Keyword.fetch!(shared, :elixir)
   @source_url Keyword.fetch!(shared, :source_url)
@@ -59,19 +59,27 @@ defmodule DurableDashboard.MixProject do
 
   defp deps do
     [
-      # The Hex version is the committed default, so a plain `mix deps.get` and
-      # `mix hex.publish` resolve durable from Hex with no special steps. For
-      # monorepo co-development, comment it and uncomment the path dep below.
-      # Bump the requirement to the durable release this dashboard targets.
-      # (Same toggle pattern as elixir-nx/nx's torchx.)
-      {:durable, "~> 0.1.0-rc"},
-      # {:durable, path: "../durable"},
+      durable_dep(),
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix, "~> 1.8"},
       {:jason, "~> 1.4"},
       {:lazy_html, ">= 0.1.0", only: :test},
+      {:stream_data, "~> 1.1", only: :test},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
+  end
+
+  # durable comes from Hex, as it ships, so `mix hex.publish` needs nothing
+  # special. DURABLE_PATH=../durable builds against a local checkout instead;
+  # CI and the workspace root set it, so the dashboard is always tested with
+  # the durable beside it.
+  defp durable_dep do
+    case System.get_env("DURABLE_PATH") do
+      nil -> {:durable, "~> 2.2"}
+      path -> {:durable, path: path}
+    end
   end
 
   defp aliases do
@@ -79,14 +87,14 @@ defmodule DurableDashboard.MixProject do
       setup: ["deps.get", "assets.setup"],
       "assets.setup": ["cmd --cd assets pnpm install"],
       "assets.build": ["cmd --cd assets pnpm build"],
-      # Formats + autofixes the React/TS island via Biome (biome check --write).
+      # Autofixes lint (oxlint --fix) and formats (oxfmt) the TS/React island.
       "assets.format": ["cmd --cd assets pnpm lint:fix"],
       "assets.typecheck": ["cmd --cd assets pnpm typecheck"],
       "hex.build": ["assets.build", "hex.build"],
       "hex.publish": ["assets.build", "hex.publish"],
       # All formatting + checks, Elixir and frontend. `format` + `assets.format`
       # cover formatting (Elixir + TS); `assets.typecheck` is the JS-side static
-      # check (this package has no credo dependency). Runs in :test env via cli/0.
+      # check, and `credo --strict` the Elixir one. Runs in :test env via cli/0.
       #
       # Ordering matters: the `assets.*` steps shell out via `mix cmd --cd assets`,
       # which shifts the VM's cwd. A `cmd` step interleaved between `compile` and
@@ -98,6 +106,7 @@ defmodule DurableDashboard.MixProject do
         "assets.typecheck",
         "format",
         "compile --warnings-as-errors",
+        "credo --strict",
         "test"
       ]
     ]
@@ -107,8 +116,10 @@ defmodule DurableDashboard.MixProject do
     [
       main: "readme",
       source_url: @source_url,
-      source_ref: "v#{@version}",
-      extras: ["README.md"]
+      # Each package lives in a subdirectory and has its own tags.
+      source_url_pattern:
+        "#{@source_url}/blob/durable_dashboard-v#{@version}/durable_dashboard/%{path}#L%{line}",
+      extras: ["README.md", "guides/using_the_dashboard.md", "CHANGELOG.md"]
     ]
   end
 
@@ -117,7 +128,7 @@ defmodule DurableDashboard.MixProject do
       maintainers: @maintainers,
       licenses: @licenses,
       links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
+      files: ~w(lib priv .formatter.exs mix.exs README.md CHANGELOG.md LICENSE shared.exs)
     ]
   end
 end

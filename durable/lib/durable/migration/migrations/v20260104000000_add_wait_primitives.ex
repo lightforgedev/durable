@@ -25,21 +25,25 @@ defmodule Durable.Migration.Migrations.V20260104000000AddWaitPrimitives do
 
   # Add new columns to pending_inputs for parallel/foreach support
   defp alter_pending_inputs(prefix) do
-    add_column_if_not_exists(:pending_inputs, :parallel_id, :integer, [], prefix)
-    add_column_if_not_exists(:pending_inputs, :foreach_id, :integer, [], prefix)
-    add_column_if_not_exists(:pending_inputs, :foreach_index, :integer, [], prefix)
-    add_column_if_not_exists(:pending_inputs, :timeout_value, json_type(), [], prefix)
-    add_column_if_not_exists(:pending_inputs, :on_timeout, :string, [default: "resume"], prefix)
-    add_column_if_not_exists(:pending_inputs, :metadata, json_type(), [], prefix)
+    alter table(:pending_inputs, prefix: prefix) do
+      add_if_not_exists(:parallel_id, :integer)
+      add_if_not_exists(:foreach_id, :integer)
+      add_if_not_exists(:foreach_index, :integer)
+      add_if_not_exists(:timeout_value, :jsonb)
+      add_if_not_exists(:on_timeout, :string, default: "resume")
+      add_if_not_exists(:metadata, :jsonb)
+    end
   end
 
   defp remove_pending_inputs_columns(prefix) do
-    remove_column_if_exists(:pending_inputs, :parallel_id, :integer, prefix)
-    remove_column_if_exists(:pending_inputs, :foreach_id, :integer, prefix)
-    remove_column_if_exists(:pending_inputs, :foreach_index, :integer, prefix)
-    remove_column_if_exists(:pending_inputs, :timeout_value, json_type(), prefix)
-    remove_column_if_exists(:pending_inputs, :on_timeout, :string, prefix)
-    remove_column_if_exists(:pending_inputs, :metadata, json_type(), prefix)
+    alter table(:pending_inputs, prefix: prefix) do
+      remove_if_exists(:parallel_id, :integer)
+      remove_if_exists(:foreach_id, :integer)
+      remove_if_exists(:foreach_index, :integer)
+      remove_if_exists(:timeout_value, :jsonb)
+      remove_if_exists(:on_timeout, :string)
+      remove_if_exists(:metadata, :jsonb)
+    end
   end
 
   # pending_events table for wait_for_event support
@@ -60,9 +64,9 @@ defmodule Durable.Migration.Migrations.V20260104000000AddWaitPrimitives do
       add(:event_name, :string, null: false)
       add(:step_name, :string, null: false)
       add(:status, :string, null: false, default: "pending")
-      add(:payload, json_type())
+      add(:payload, :jsonb)
       add(:timeout_at, :utc_datetime_usec)
-      add(:timeout_value, json_type())
+      add(:timeout_value, :jsonb)
 
       # For wait_for_any / wait_for_all patterns
       add(:wait_group_id, :binary_id)
@@ -114,10 +118,10 @@ defmodule Durable.Migration.Migrations.V20260104000000AddWaitPrimitives do
       add(:step_name, :string, null: false)
       add(:wait_type, :string, null: false)
       add(:event_names, {:array, :string}, null: false)
-      add(:received_events, json_type(), default: "{}")
+      add(:received_events, :jsonb, default: "{}")
       add(:status, :string, null: false, default: "pending")
       add(:timeout_at, :utc_datetime_usec)
-      add(:timeout_value, json_type())
+      add(:timeout_value, :jsonb)
       add(:completed_at, :utc_datetime_usec)
 
       # For parallel/foreach context

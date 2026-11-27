@@ -256,6 +256,68 @@ defmodule Durable.BranchTest do
   end
 
   # Helper functions
+  describe "what a branch clause can hold" do
+    test "anything but a step is a compile error that names it" do
+      error =
+        assert_raise CompileError, fn ->
+          Code.compile_string(
+            """
+            defmodule BranchHoldingADecision do
+              use Durable
+
+              workflow "w" do
+                branch on: fn data -> data["kind"] end do
+                  "a" ->
+                    decision :check, fn data -> {:ok, data} end
+                    step :work, fn data -> {:ok, data} end
+                end
+              end
+            end
+            """,
+            "branch_holding_a_decision.ex"
+          )
+        end
+
+      assert error.description =~ "decision(:check"
+      assert error.description =~ "branch"
+      assert error.file =~ "branch_holding_a_decision.ex"
+      assert error.line == 7
+    end
+
+    test "a clause that does nothing still compiles" do
+      assert {{:module, BranchWithEmptyClause, _, _}, _} =
+               Code.eval_string("""
+               defmodule BranchWithEmptyClause do
+                 use Durable
+
+                 workflow "w" do
+                   branch on: fn data -> data["kind"] end do
+                     "a" -> step :work, fn data -> {:ok, data} end
+                     _ -> nil
+                   end
+                 end
+               end
+               """)
+    end
+  end
+
+  describe "{:goto, ...} from a step inside a branch" do
+    test "jumps past the rest of the clause and the steps between" do
+      {:ok, run} = create_and_execute_workflow(GotoInBranchWorkflow, %{"to" => "target"})
+
+      assert run.status == :completed
+      assert run.context["trail"] == ["jumps", "target"]
+    end
+
+    test "to a step that doesn't exist fails the run through the failure path" do
+      {:ok, run} = create_and_execute_workflow(GotoInBranchWorkflow, %{"to" => "nowhere"})
+
+      assert run.status == :failed
+      assert run.error["type"] == "decision_error"
+      assert run.error["message"] =~ "nowhere"
+    end
+  end
+
   defp create_and_execute_workflow(module, input) do
     config = Config.get(Durable)
     repo = config.repo
@@ -300,27 +362,27 @@ defmodule SimpleBranchTestWorkflow do
   use Durable.Helpers
 
   workflow "simple_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       # In pipeline model, first step receives workflow input directly
       doc_type = String.to_atom(data["doc_type"])
       {:ok, assign(data, :doc_type, doc_type)}
-    end)
-
-    branch on: fn data -> data.doc_type end do
-      :invoice ->
-        step(:process_invoice, fn data ->
-          {:ok, assign(data, :processed_as, "invoice")}
-        end)
-
-      :contract ->
-        step(:process_contract, fn data ->
-          {:ok, assign(data, :processed_as, "contract")}
-        end)
     end
 
-    step(:final, fn data ->
+    branch on: fn data -> data["doc_type"] end do
+      :invoice ->
+        step :process_invoice, fn data ->
+          {:ok, assign(data, :processed_as, "invoice")}
+        end
+
+      :contract ->
+        step :process_contract, fn data ->
+          {:ok, assign(data, :processed_as, "contract")}
+        end
+    end
+
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -329,26 +391,26 @@ defmodule BranchWithDefaultWorkflow do
   use Durable.Helpers
 
   workflow "branch_with_default" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       doc_type = String.to_atom(data["doc_type"])
       {:ok, assign(data, :doc_type, doc_type)}
-    end)
-
-    branch on: fn data -> data.doc_type end do
-      :invoice ->
-        step(:process_invoice, fn data ->
-          {:ok, assign(data, :processed_as, "invoice")}
-        end)
-
-      _ ->
-        step(:manual_review, fn data ->
-          {:ok, assign(data, :processed_as, "manual_review")}
-        end)
     end
 
-    step(:done, fn data ->
+    branch on: fn data -> data["doc_type"] end do
+      :invoice ->
+        step :process_invoice, fn data ->
+          {:ok, assign(data, :processed_as, "invoice")}
+        end
+
+      _ ->
+        step :manual_review, fn data ->
+          {:ok, assign(data, :processed_as, "manual_review")}
+        end
+    end
+
+    step :done, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -357,30 +419,30 @@ defmodule MultiStepBranchWorkflow do
   use Durable.Helpers
 
   workflow "multi_step_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       doc_type = String.to_atom(data["doc_type"])
       {:ok, assign(data, :doc_type, doc_type)}
-    end)
-
-    branch on: fn data -> data.doc_type end do
-      :invoice ->
-        step(:extract_invoice, fn data ->
-          {:ok, assign(data, :step_1, "extracted")}
-        end)
-
-        step(:validate_invoice, fn data ->
-          {:ok, assign(data, :step_2, "validated")}
-        end)
-
-      :contract ->
-        step(:extract_contract, fn data ->
-          {:ok, assign(data, :step_1, "extracted")}
-        end)
     end
 
-    step(:store, fn data ->
+    branch on: fn data -> data["doc_type"] end do
+      :invoice ->
+        step :extract_invoice, fn data ->
+          {:ok, assign(data, :step_1, "extracted")}
+        end
+
+        step :validate_invoice, fn data ->
+          {:ok, assign(data, :step_2, "validated")}
+        end
+
+      :contract ->
+        step :extract_contract, fn data ->
+          {:ok, assign(data, :step_1, "extracted")}
+        end
+    end
+
+    step :store, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -389,25 +451,25 @@ defmodule ContextBranchWorkflow do
   use Durable.Helpers
 
   workflow "context_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :amount, data["amount"])}
-    end)
-
-    branch on: fn data -> data.amount > 1000 end do
-      true ->
-        step(:manager_approval, fn data ->
-          {:ok, assign(data, :approval_type, "manager")}
-        end)
-
-      false ->
-        step(:auto_approval, fn data ->
-          {:ok, assign(data, :approval_type, "auto")}
-        end)
     end
 
-    step(:complete, fn data ->
+    branch on: fn data -> data["amount"] > 1000 end do
+      true ->
+        step :manager_approval, fn data ->
+          {:ok, assign(data, :approval_type, "manager")}
+        end
+
+      false ->
+        step :auto_approval, fn data ->
+          {:ok, assign(data, :approval_type, "auto")}
+        end
+    end
+
+    step :complete, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -416,31 +478,31 @@ defmodule StringConditionBranchWorkflow do
   use Durable.Helpers
 
   workflow "string_condition_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       # Keep the string type, don't convert to atom
       {:ok, assign(data, :category, data["category"])}
-    end)
-
-    branch on: fn data -> data.category end do
-      "electronics" ->
-        step(:process_electronics, fn data ->
-          {:ok, assign(data, :processed_as, "electronics")}
-        end)
-
-      "clothing" ->
-        step(:process_clothing, fn data ->
-          {:ok, assign(data, :processed_as, "clothing")}
-        end)
-
-      _ ->
-        step(:process_other, fn data ->
-          {:ok, assign(data, :processed_as, "other")}
-        end)
     end
 
-    step(:done, fn data ->
+    branch on: fn data -> data["category"] end do
+      "electronics" ->
+        step :process_electronics, fn data ->
+          {:ok, assign(data, :processed_as, "electronics")}
+        end
+
+      "clothing" ->
+        step :process_clothing, fn data ->
+          {:ok, assign(data, :processed_as, "clothing")}
+        end
+
+      _ ->
+        step :process_other, fn data ->
+          {:ok, assign(data, :processed_as, "other")}
+        end
+    end
+
+    step :done, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -451,35 +513,35 @@ defmodule IntegerConditionBranchWorkflow do
   use Durable.Helpers
 
   workflow "integer_condition_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :priority, data["priority"])}
-    end)
-
-    branch on: fn data -> data.priority end do
-      1 ->
-        step(:high_priority, fn data ->
-          {:ok, assign(data, :processed_as, "high")}
-        end)
-
-      2 ->
-        step(:medium_priority, fn data ->
-          {:ok, assign(data, :processed_as, "medium")}
-        end)
-
-      3 ->
-        step(:low_priority, fn data ->
-          {:ok, assign(data, :processed_as, "low")}
-        end)
-
-      _ ->
-        step(:unknown_priority, fn data ->
-          {:ok, assign(data, :processed_as, "unknown")}
-        end)
     end
 
-    step(:done, fn data ->
+    branch on: fn data -> data["priority"] end do
+      1 ->
+        step :high_priority, fn data ->
+          {:ok, assign(data, :processed_as, "high")}
+        end
+
+      2 ->
+        step :medium_priority, fn data ->
+          {:ok, assign(data, :processed_as, "medium")}
+        end
+
+      3 ->
+        step :low_priority, fn data ->
+          {:ok, assign(data, :processed_as, "low")}
+        end
+
+      _ ->
+        step :unknown_priority, fn data ->
+          {:ok, assign(data, :processed_as, "unknown")}
+        end
+    end
+
+    step :done, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -488,25 +550,25 @@ defmodule BooleanConditionBranchWorkflow do
   use Durable.Helpers
 
   workflow "boolean_condition_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :enabled, data["enabled"])}
-    end)
-
-    branch on: fn data -> data.enabled end do
-      true ->
-        step(:process_enabled, fn data ->
-          {:ok, assign(data, :processed_as, "enabled")}
-        end)
-
-      false ->
-        step(:process_disabled, fn data ->
-          {:ok, assign(data, :processed_as, "disabled")}
-        end)
     end
 
-    step(:done, fn data ->
+    branch on: fn data -> data["enabled"] end do
+      true ->
+        step :process_enabled, fn data ->
+          {:ok, assign(data, :processed_as, "enabled")}
+        end
+
+      false ->
+        step :process_disabled, fn data ->
+          {:ok, assign(data, :processed_as, "disabled")}
+        end
+    end
+
+    step :done, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -515,25 +577,25 @@ defmodule NilConditionBranchWorkflow do
   use Durable.Helpers
 
   workflow "nil_condition_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :value, data["value"])}
-    end)
-
-    branch on: fn data -> data.value end do
-      nil ->
-        step(:handle_nil, fn data ->
-          {:ok, assign(data, :processed_as, "nil_handled")}
-        end)
-
-      _ ->
-        step(:handle_other, fn data ->
-          {:ok, assign(data, :processed_as, "other")}
-        end)
     end
 
-    step(:done, fn data ->
+    branch on: fn data -> data["value"] end do
+      nil ->
+        step :handle_nil, fn data ->
+          {:ok, assign(data, :processed_as, "nil_handled")}
+        end
+
+      _ ->
+        step :handle_other, fn data ->
+          {:ok, assign(data, :processed_as, "other")}
+        end
+    end
+
+    step :done, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -542,24 +604,44 @@ defmodule ExceptionConditionBranchWorkflow do
   use Durable.Helpers
 
   workflow "exception_condition_branch" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, data}
-    end)
+    end
 
     branch on: fn _data -> raise "Condition evaluation failed" end do
       :a ->
-        step(:process_a, fn data ->
+        step :process_a, fn data ->
           {:ok, assign(data, :processed_as, "a")}
-        end)
+        end
 
       _ ->
-        step(:process_default, fn data ->
+        step :process_default, fn data ->
           {:ok, assign(data, :processed_as, "default")}
-        end)
+        end
     end
 
-    step(:done, fn data ->
+    step :done, fn data ->
       {:ok, data}
-    end)
+    end
+  end
+end
+
+defmodule GotoInBranchWorkflow do
+  use Durable
+
+  workflow "goto_in_branch" do
+    branch on: fn _data -> "a" end do
+      "a" ->
+        step :jumps, fn data ->
+          target = if data["to"] == "target", do: :target, else: :nowhere
+          {:goto, target, Map.put(data, "trail", ["jumps"])}
+        end
+
+        step :rest_of_clause, fn data -> {:ok, Map.put(data, "trail", ["rest_of_clause"])} end
+    end
+
+    step :between, fn data -> {:ok, Map.put(data, "trail", ["between"])} end
+
+    step :target, fn data -> {:ok, Map.update!(data, "trail", &(&1 ++ ["target"]))} end
   end
 end

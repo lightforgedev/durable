@@ -2,6 +2,46 @@
 
 Execute different steps based on runtime conditions.
 
+## Named Branches
+
+Give a branch a name and a function, and the function runs as a step. It returns `{arm, data}`, naming one of the arms in the block:
+
+```elixir
+step :score_risk, [retry: [max_attempts: 3]], fn order ->
+  {:ok, assign(order, :risk, Risk.score(order))}
+end
+
+branch :risk, fn order ->
+  cond do
+    order["risk"] < 40 -> {:clear, order}
+    order["risk"] < 80 -> {:review, order}
+    true -> {:blocked, order}
+  end
+end do
+  :clear ->
+    pass()
+
+  :review ->
+    step :ask_reviewer, fn order -> ... end
+    step :record_review, fn order -> ... end
+
+  :blocked ->
+    step :tell_customer, fn order -> ... end
+    step :cancel_order, fn _order -> {:cancel, "blocked by risk check"} end
+end
+
+step :charge_card, fn order -> ... end
+```
+
+- **The function is a step.** It has its own row, logs and span, and takes `retry:` and `timeout:`: `branch :risk, [retry: [max_attempts: 3]], fn order -> ... end do`. It can return anything a step can: `{:error, reason}` is retried, `{:fail, reason}` isn't.
+- **The choice is stored with its result.** A run that is stopped and comes back takes the arm it already chose. Like any step, the function runs again only if it never got to save its result.
+- **An arm the block doesn't have fails the run** at once, with an error that names what was returned and the arms there are. The same goes for data that isn't a map.
+- **An arm is a sequence.** It holds steps, other named branches and named parallel blocks, or `pass()` for nothing. Its last result goes to whatever follows the block.
+- **Steps are stored under the block and the arm**, as `risk__review__ask_reviewer`. Two arms can use the same step name, and renaming a step renames only that step.
+- **An arm can't be called** `:ok`, `:error`, `:fail`, `:snooze`, `:cancel` or `:goto`: those are step results.
+
+The rest of this guide covers the older form, `branch on: fn`, which keeps working. Its `on:` function is not a step: it has no retries or timeout, and an error in it fails the run.
+
 ## Basic Usage
 
 The `branch` macro evaluates a condition function and executes only the matching clause:
@@ -17,13 +57,13 @@ defmodule MyApp.DocumentProcessor do
       {:ok, assign(ctx, :doc_type, doc_type)}
     end
 
-    branch on: fn ctx -> ctx.doc_type end do
-      :invoice ->
+    branch on: fn ctx -> ctx["doc_type"] end do
+      "invoice" ->
         step :process_invoice, fn ctx ->
           {:ok, assign(ctx, :extracted, extract_invoice_data(ctx))}
         end
 
-      :contract ->
+      "contract" ->
         step :process_contract, fn ctx ->
           {:ok, assign(ctx, :extracted, extract_contract_data(ctx))}
         end
@@ -51,25 +91,29 @@ The `on:` option takes a function that returns a value. That value is matched ag
 
 | Pattern | Example |
 |---------|---------|
-| Atoms | `:invoice`, `:pending`, `:active` |
 | Strings | `"pdf"`, `"high"` |
-| Integers | `1`, `2`, `100` |
+| Atoms | `:invoice`, `:pending`, `:active` |
+| Integers | `1`, `-2`, `100` |
 | Booleans | `true`, `false` |
 | Default | `_` (matches anything) |
 
+A clause matches by equality, so any other pattern (a float, a tuple, a map, a guard) is a compile error. Compute the value to match on in `on:` instead.
+
+**Write string clauses for values read from the data.** The data is handed to `on:` as it is stored, so an atom a step returned is its text: after `assign(ctx, :status, :active)`, `ctx["status"]` is `"active"`. An atom clause also matches the atom's text, so `:active ->` takes `"active"` too. A string clause matches only a string.
+
 ```elixir
-# Matching atoms
-branch on: fn ctx -> ctx.status end do
-  :active ->
+# Matching strings read from the data
+branch on: fn ctx -> ctx["status"] end do
+  "active" ->
     step :handle_active, fn ctx -> {:ok, ctx} end
-  :pending ->
+  "pending" ->
     step :handle_pending, fn ctx -> {:ok, ctx} end
   _ ->
     step :handle_other, fn ctx -> {:ok, ctx} end
 end
 
-# Matching strings
-branch on: fn ctx -> ctx.format end do
+# More strings
+branch on: fn ctx -> ctx["format"] end do
   "pdf" ->
     step :process_pdf, fn ctx -> {:ok, ctx} end
   "docx" ->
@@ -79,7 +123,7 @@ branch on: fn ctx -> ctx.format end do
 end
 
 # Matching booleans
-branch on: fn ctx -> ctx.is_premium end do
+branch on: fn ctx -> ctx["is_premium"] end do
   true ->
     step :premium_flow, fn ctx -> {:ok, ctx} end
   false ->
@@ -87,7 +131,7 @@ branch on: fn ctx -> ctx.is_premium end do
 end
 
 # Matching integers
-branch on: fn ctx -> ctx.tier end do
+branch on: fn ctx -> ctx["tier"] end do
   1 ->
     step :tier_one, fn ctx -> {:ok, ctx} end
   2 ->
@@ -102,8 +146,8 @@ end
 Each branch can contain multiple steps that execute sequentially:
 
 ```elixir
-branch on: fn ctx -> ctx.order_type end do
-  :subscription ->
+branch on: fn ctx -> ctx["order_type"] end do
+  "subscription" ->
     step :validate_subscription, fn ctx ->
       {:ok, assign(ctx, :validated, validate_recurring_payment(ctx))}
     end
@@ -116,7 +160,7 @@ branch on: fn ctx -> ctx.order_type end do
       {:ok, assign(ctx, :renewal_scheduled, schedule_monthly_charge(ctx))}
     end
 
-  :one_time ->
+  "one_time" ->
     step :process_payment, fn ctx ->
       {:ok, assign(ctx, :charged, charge_once(ctx))}
     end
@@ -128,21 +172,21 @@ end
 The `_` pattern matches any value not matched by other clauses:
 
 ```elixir
-branch on: fn ctx -> ctx.priority end do
-  :critical ->
+branch on: fn ctx -> ctx["priority"] end do
+  "critical" ->
     step :alert_oncall, fn ctx ->
       PagerDuty.alert()
       {:ok, ctx}
     end
 
-  :high ->
+  "high" ->
     step :create_urgent_ticket, fn ctx ->
       Tickets.create(priority: :high)
       {:ok, ctx}
     end
 
   _ ->
-    # Matches :medium, :low, or any other value
+    # Matches "medium", "low", or any other value
     step :create_normal_ticket, fn ctx ->
       Tickets.create(priority: :normal)
       {:ok, ctx}
@@ -158,42 +202,42 @@ end
 workflow "process_order" do
   step :load_order, fn ctx ->
     order = Orders.get(ctx["order_id"])
-    {:ok, %{order: order, order_type: order.type}}
+    {:ok, %{order: order, order_type: to_string(order.type)}}
   end
 
-  branch on: fn ctx -> ctx.order_type end do
-    :digital ->
+  branch on: fn ctx -> ctx["order_type"] end do
+    "digital" ->
       step :generate_download_link, fn ctx ->
-        link = Downloads.create(ctx.order)
+        link = Downloads.create(ctx["order"])
         {:ok, ctx
-        |> assign(:delivery_method, :download)
+        |> assign(:delivery_method, "download")
         |> assign(:download_link, link)}
       end
 
-    :physical ->
+    "physical" ->
       step :create_shipment, fn ctx ->
-        shipment = Shipping.create(ctx.order)
+        shipment = Shipping.create(ctx["order"])
         {:ok, ctx
-        |> assign(:delivery_method, :shipping)
+        |> assign(:delivery_method, "shipping")
         |> assign(:tracking_number, shipment.tracking)}
       end
 
       step :notify_warehouse, fn ctx ->
-        Warehouse.queue_pick(ctx.order)
+        Warehouse.queue_pick(ctx["order"])
         {:ok, ctx}
       end
 
-    :service ->
+    "service" ->
       step :schedule_appointment, fn ctx ->
-        slot = Calendar.book(ctx.order)
+        slot = Calendar.book(ctx["order"])
         {:ok, ctx
-        |> assign(:delivery_method, :appointment)
+        |> assign(:delivery_method, "appointment")
         |> assign(:appointment, slot)}
       end
   end
 
   step :send_confirmation, fn ctx ->
-    Email.send_order_confirmation(ctx.order, ctx.delivery_method)
+    Email.send_order_confirmation(ctx["order"], ctx["delivery_method"])
     {:ok, ctx}
   end
 end
@@ -205,40 +249,43 @@ end
 workflow "verify_user" do
   step :check_verification_status, fn ctx ->
     user = Users.get(ctx["user_id"])
+    # Keep what later steps read, not the whole user. A step may return atom
+    # keys; later steps read them as strings: ctx["email"].
     {:ok, %{
-      user: user,
+      email: user.email,
+      phone: user.phone,
       verified: user.email_verified and user.phone_verified,
-      verification_method: user.preferred_verification
+      verification_method: to_string(user.preferred_verification)
     }}
   end
 
-  branch on: fn ctx -> ctx.verified end do
+  branch on: fn ctx -> ctx["verified"] end do
     true ->
       step :already_verified, fn ctx ->
-        {:ok, assign(ctx, :result, :already_verified)}
+        {:ok, assign(ctx, :result, "already_verified")}
       end
 
     false ->
       # Nested branch for verification method
-      branch on: fn ctx -> ctx.verification_method end do
-        :email ->
+      branch on: fn ctx -> ctx["verification_method"] end do
+        "email" ->
           step :send_email_code, fn ctx ->
             code = generate_code()
-            Email.send_verification(ctx.user.email, code)
-            {:ok, assign(ctx, :pending_verification, :email)}
+            Email.send_verification(ctx["email"], code)
+            {:ok, assign(ctx, :pending_verification, "email")}
           end
 
-        :sms ->
+        "sms" ->
           step :send_sms_code, fn ctx ->
             code = generate_code()
-            SMS.send(ctx.user.phone, code)
-            {:ok, assign(ctx, :pending_verification, :sms)}
+            SMS.send(ctx["phone"], code)
+            {:ok, assign(ctx, :pending_verification, "sms")}
           end
 
         _ ->
           step :require_manual_verification, fn ctx ->
-            Support.create_verification_ticket(ctx.user)
-            {:ok, assign(ctx, :pending_verification, :manual)}
+            Support.create_verification_ticket(ctx["email"])
+            {:ok, assign(ctx, :pending_verification, "manual")}
           end
       end
   end
@@ -256,41 +303,41 @@ workflow "expense_routing" do
 
   step :determine_tier, fn ctx ->
     tier = cond do
-      ctx.amount > 10000 -> :executive
-      ctx.amount > 1000 -> :manager
-      ctx.amount > 100 -> :team_lead
-      true -> :auto
+      ctx["amount"] > 10000 -> "executive"
+      ctx["amount"] > 1000 -> "manager"
+      ctx["amount"] > 100 -> "team_lead"
+      true -> "auto"
     end
     {:ok, assign(ctx, :approval_tier, tier)}
   end
 
-  branch on: fn ctx -> ctx.approval_tier end do
-    :executive ->
+  branch on: fn ctx -> ctx["approval_tier"] end do
+    "executive" ->
       step :cfo_approval, fn ctx ->
-        request_approval(:cfo, ctx.expense)
+        request_approval(:cfo, ctx["expense"])
         {:ok, ctx}
       end
 
       step :ceo_approval, fn ctx ->
-        request_approval(:ceo, ctx.expense)
+        request_approval(:ceo, ctx["expense"])
         {:ok, ctx}
       end
 
-    :manager ->
+    "manager" ->
       step :manager_approval, fn ctx ->
-        request_approval(:manager, ctx.expense)
+        request_approval(:manager, ctx["expense"])
         {:ok, ctx}
       end
 
-    :team_lead ->
+    "team_lead" ->
       step :team_lead_approval, fn ctx ->
-        request_approval(:team_lead, ctx.expense)
+        request_approval(:team_lead, ctx["expense"])
         {:ok, ctx}
       end
 
-    :auto ->
+    "auto" ->
       step :auto_approve, fn ctx ->
-        Expenses.approve(ctx.expense, approver: :system)
+        Expenses.approve(ctx["expense"], approver: :system)
         {:ok, ctx}
       end
   end
@@ -320,16 +367,16 @@ Durable provides two ways to control flow:
 
 ```elixir
 # Prefer branch for distinct paths
-branch on: fn ctx -> ctx.type end do
-  :a ->
+branch on: fn ctx -> ctx["type"] end do
+  "a" ->
     step :handle_a, fn ctx -> {:ok, ctx} end
-  :b ->
+  "b" ->
     step :handle_b, fn ctx -> {:ok, ctx} end
 end
 
 # Decision for simple skips
 decision :check_skip, fn ctx ->
-  if ctx.skip_optional do
+  if ctx["skip_optional"] do
     {:goto, :final_step, ctx}
   else
     {:ok, ctx}
@@ -340,21 +387,23 @@ step :optional_step, fn ctx -> {:ok, ctx} end
 step :final_step, fn ctx -> {:ok, ctx} end
 ```
 
+A jump goes forward only, and can't land inside a branch arm or a parallel lane it isn't in: that jump is refused and the run fails. A step inside an arm can jump ahead in its own arm, or out of the block.
+
 ## Best Practices
 
 ### Always Include a Default Clause
 
 ```elixir
-branch on: fn ctx -> ctx.status end do
-  :active ->
+branch on: fn ctx -> ctx["status"] end do
+  "active" ->
     step :handle_active, fn ctx -> {:ok, ctx} end
-  :pending ->
+  "pending" ->
     step :handle_pending, fn ctx -> {:ok, ctx} end
   _ ->
     # Handle unexpected values gracefully
     step :handle_unknown, fn ctx ->
-      Logger.warning("Unknown status: #{ctx.status}")
-      {:ok, assign(ctx, :error, :unknown_status)}
+      Logger.warning("Unknown status: #{ctx["status"]}")
+      {:ok, assign(ctx, :error, "unknown_status")}
     end
 end
 ```
@@ -363,18 +412,18 @@ end
 
 ```elixir
 # Good - each branch does one thing
-branch on: fn ctx -> ctx.payment_method end do
-  :card ->
+branch on: fn ctx -> ctx["payment_method"] end do
+  "card" ->
     step :charge_card, fn ctx -> {:ok, ctx} end
-  :bank ->
+  "bank" ->
     step :initiate_transfer, fn ctx -> {:ok, ctx} end
-  :crypto ->
+  "crypto" ->
     step :process_crypto, fn ctx -> {:ok, ctx} end
 end
 
 # Avoid - too much logic in branches
-branch on: fn ctx -> ctx.type end do
-  :a ->
+branch on: fn ctx -> ctx["type"] end do
+  "a" ->
     step :step1, fn ctx -> {:ok, ctx} end
     step :step2, fn ctx -> {:ok, ctx} end
     step :step3, fn ctx -> {:ok, ctx} end
@@ -389,13 +438,13 @@ end
 ```elixir
 # Good
 step :classify, fn ctx ->
-  {:ok, assign(ctx, :document_type, :invoice)}
+  {:ok, assign(ctx, :document_type, "invoice")}
 end
-branch on: fn ctx -> ctx.document_type end do ... end
+branch on: fn ctx -> ctx["document_type"] end do ... end
 
 # Avoid
 step :classify, fn ctx ->
-  {:ok, assign(ctx, :t, :i)}
+  {:ok, assign(ctx, :t, "i")}
 end
-branch on: fn ctx -> ctx.t end do ... end
+branch on: fn ctx -> ctx["t"] end do ... end
 ```

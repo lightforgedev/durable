@@ -1,13 +1,22 @@
 defmodule Durable.MixProject do
   use Mix.Project
 
-  # Lightforge distributes Durable as a standalone repository, unlike the
-  # upstream monorepo. Keep the package metadata beside mix.exs so every clone
-  # and Hex build is self-contained.
-  {shared, _bindings} = Code.eval_file(Path.join(__DIR__, "shared.exs"))
+  # Shared monorepo metadata. Canonical values live in ../shared.exs; Hex
+  # tarballs can't reference files outside the package root, so we copy that
+  # file next to this mix.exs (the copy is what ships) and read it back.
+  # Edit ../shared.exs, never the git-ignored copy beside this file.
+  shared_src = Path.join(__DIR__, "../shared.exs")
+  shared_dst = Path.join(__DIR__, "shared.exs")
+
+  if File.exists?(shared_src) and
+       (not File.exists?(shared_dst) or File.read!(shared_dst) != File.read!(shared_src)) do
+    File.cp!(shared_src, shared_dst)
+  end
+
+  {shared, _bindings} = Code.eval_file(shared_dst)
 
   # Versioned independently of durable_dashboard.
-  @version "0.1.0-rc"
+  @version "2.2.0"
   @elixir_requirement Keyword.fetch!(shared, :elixir)
   @source_url Keyword.fetch!(shared, :source_url)
   @homepage_url Keyword.fetch!(shared, :homepage_url)
@@ -20,6 +29,8 @@ defmodule Durable.MixProject do
       version: @version,
       elixir: @elixir_requirement,
       elixirc_paths: elixirc_paths(Mix.env()),
+      # The clock-skew swarm runs in containers, from test/skew/run.sh.
+      test_ignore_filters: [&String.starts_with?(&1, "test/skew/")],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
@@ -40,7 +51,7 @@ defmodule Durable.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger],
       mod: {Durable.Application, []}
     ]
   end
@@ -59,14 +70,16 @@ defmodule Durable.MixProject do
       {:crontab, "~> 1.1"},
       {:igniter, "~> 0.6", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
-      # SQLite storage (single-node hosts, e.g. a desktop app). 0.23 is the
-      # last line on ecto ~> 3.13.0 and decimal 2.x, which the Platform pins.
-      {:ecto_sqlite3, "~> 0.23.0", optional: true},
+      {:telemetry_metrics, "~> 1.0", optional: true},
+      {:opentelemetry_api, "~> 1.4", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:stream_data, "~> 1.1", only: [:dev, :test]},
+      {:opentelemetry, "~> 1.5", only: [:dev, :test]}
     ]
   end
 
@@ -76,7 +89,12 @@ defmodule Durable.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
-      precommit: ["format", "compile --warnings-as-errors", "credo --strict", "test"]
+      precommit: [
+        "format",
+        "compile --warnings-as-errors",
+        "credo --strict",
+        "test --warnings-as-errors"
+      ]
     ]
   end
 
@@ -84,16 +102,21 @@ defmodule Durable.MixProject do
     [
       main: "readme",
       source_url: @source_url,
-      source_ref: "v#{@version}",
+      # Each package lives in a subdirectory and has its own tags.
+      source_url_pattern: "#{@source_url}/blob/durable-v#{@version}/durable/%{path}#L%{line}",
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "guides/ai_workflows.md",
         "guides/branching.md",
+        "guides/coming_from_oban.md",
         "guides/compensations.md",
-        "guides/admission_and_wait_ingress.md",
         "guides/orchestration.md",
         "guides/parallel.md",
-        "guides/waiting.md"
+        "guides/production.md",
+        "guides/testing.md",
+        "guides/waiting.md",
+        "guides/workflow_keys.md"
       ],
       groups_for_modules: [
         "Mix Tasks": [
@@ -114,7 +137,7 @@ defmodule Durable.MixProject do
       maintainers: @maintainers,
       licenses: @licenses,
       links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
+      files: ~w(lib priv .formatter.exs mix.exs README.md CHANGELOG.md LICENSE shared.exs)
     ]
   end
 end

@@ -9,9 +9,11 @@ defmodule Durable.Storage.Schemas.PendingEvent do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Durable.Clock
+
   @type wait_type :: :single | :any | :all
 
-  @type status :: :pending | :received | :timeout | :cancelled
+  @type status :: :pending | :received | :timeout | :cancelled | :buffered
 
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
@@ -22,7 +24,6 @@ defmodule Durable.Storage.Schemas.PendingEvent do
           payload: map() | nil,
           timeout_at: DateTime.t() | nil,
           timeout_value: term() | nil,
-          on_timeout: :resume | :fail,
           wait_group_id: Ecto.UUID.t() | nil,
           wait_type: wait_type(),
           parallel_id: integer() | nil,
@@ -35,22 +36,19 @@ defmodule Durable.Storage.Schemas.PendingEvent do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-  # PostgreSQL schema by default; `nil` for SQLite (see Durable.Storage.Dialect).
-  @schema_prefix Application.compile_env(:durable, :schema_prefix, "durable")
+  @schema_prefix "durable"
   schema "pending_events" do
     field(:event_name, :string)
     field(:step_name, :string)
 
     field(:status, Ecto.Enum,
-      values: [:pending, :received, :timeout, :cancelled],
+      values: [:pending, :received, :timeout, :cancelled, :buffered],
       default: :pending
     )
 
-    field(:payload, :map)
+    field(:payload, Durable.Storage.JsonMap)
     field(:timeout_at, :utc_datetime_usec)
     field(:timeout_value, :map)
-
-    field(:on_timeout, Ecto.Enum, values: [:resume, :fail], default: :resume)
 
     # For wait_for_any / wait_for_all patterns
     field(:wait_group_id, :binary_id)
@@ -69,7 +67,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_id, :event_name, :step_name]
@@ -78,7 +76,6 @@ defmodule Durable.Storage.Schemas.PendingEvent do
     :payload,
     :timeout_at,
     :timeout_value,
-    :on_timeout,
     :wait_group_id,
     :wait_type,
     :parallel_id,
@@ -106,7 +103,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
       %{
         status: :received,
         payload: payload,
-        completed_at: DateTime.utc_now()
+        completed_at: Clock.utc_now()
       },
       [:status, :payload, :completed_at]
     )
@@ -117,7 +114,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
   """
   def timeout_changeset(pending_event) do
     pending_event
-    |> cast(%{status: :timeout, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :timeout, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 
   @doc """
@@ -125,6 +122,6 @@ defmodule Durable.Storage.Schemas.PendingEvent do
   """
   def cancel_changeset(pending_event) do
     pending_event
-    |> cast(%{status: :cancelled, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :cancelled, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 end

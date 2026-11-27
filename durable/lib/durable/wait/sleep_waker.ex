@@ -8,7 +8,7 @@ defmodule Durable.Wait.SleepWaker do
   periodically asks the queue adapter to flip any such row back to
   `:pending` once `scheduled_at <= NOW()`, so the queue poller can
   re-claim it. The adapter also merges a `:__sleep_satisfied__` marker
-  into the workflow's context so the step body's next sleep call
+  into the run's engine state so the step body's next sleep call
   returns immediately rather than re-throwing.
 
   Polls every `:sleep_waker_interval` milliseconds (default 1_000) and
@@ -91,7 +91,7 @@ defmodule Durable.Wait.SleepWaker do
   # Private
 
   defp do_wake(%__MODULE__{config: config, batch_size: batch_size}) do
-    adapter = Adapter.for_config(config)
+    adapter = Adapter.default_adapter()
 
     if function_exported?(adapter, :wake_sleeping_workflows, 2) do
       case adapter.wake_sleeping_workflows(config, batch_size) do

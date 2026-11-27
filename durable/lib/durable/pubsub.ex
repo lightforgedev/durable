@@ -35,18 +35,25 @@ defmodule Durable.PubSub do
   silently no-op and subscribers simply never receive messages.
   """
 
+  alias Durable.Clock
   alias Durable.Config
+  alias Durable.Queue.CommitWaker
+  alias Durable.Repo
 
   @type kind ::
           :workflow_started
           | :workflow_resumed
           | :workflow_waiting
+          | :workflow_parked
           | :workflow_completed
           | :workflow_failed
           | :workflow_cancelled
+          | :workflow_retried
           | :step_started
           | :step_completed
           | :step_failed
+          | :step_cancelled
+          | :step_snoozed
           | :step_waiting
           | :input_requested
           | :input_provided
@@ -125,6 +132,9 @@ defmodule Durable.PubSub do
     else
       _ -> {:error, :no_pubsub}
     end
+  rescue
+    # Configured but not running. See broadcast/3.
+    ArgumentError -> {:error, :no_pubsub}
   end
 
   @doc """
@@ -185,6 +195,55 @@ defmodule Durable.PubSub do
     broadcast(config, schedules_topic(config), msg)
   end
 
+  @doc """
+  Returns the topic a queue's pollers listen on to poll right away.
+  """
+  @spec queue_topic(Config.t(), String.t() | atom()) :: String.t()
+  def queue_topic(%Config{name: name}, queue), do: "durable:#{name}:queue:#{queue}"
+
+  @doc false
+  # Tells the pollers of `run`'s queue, on every node, to poll now: called
+  # once `run` is pending and due (just started, or just resumed by an event,
+  # an input, a finished child or a retry). Runs that come due later (sleeps,
+  # retries, snoozes, delayed starts) are found by polling. A missed wake only
+  # costs the poll interval.
+  @spec wake(Config.t(), term()) :: :ok
+  def wake(%Config{} = config, %{status: :pending, queue: queue} = run) when is_binary(queue) do
+    if due?(Map.get(run, :scheduled_at)), do: signal(config, queue)
+    :ok
+  end
+
+  def wake(_config, _run), do: :ok
+
+  # A broadcast from inside a transaction reaches the pollers before they can
+  # see the run, so that one waits for the commit.
+  defp signal(%Config{repo: repo} = config, queue) do
+    cond do
+      is_nil(server(config)) -> :ok
+      repo.in_transaction?() -> wake_after_commit(config, queue)
+      true -> broadcast_wake(config, queue)
+    end
+  end
+
+  defp wake_after_commit(config, queue) do
+    with {:ok, %{rows: [[transaction]]}} <-
+           Repo.query(config, "SELECT pg_current_xact_id()::text") do
+      CommitWaker.watch(config, transaction, queue)
+    end
+
+    :ok
+  end
+
+  @doc false
+  @spec broadcast_wake(Config.t(), String.t()) :: :ok
+  def broadcast_wake(%Config{} = config, queue) do
+    broadcast(config, queue_topic(config, queue), {:durable_wake, queue})
+    :ok
+  end
+
+  defp due?(nil), do: true
+  defp due?(at), do: DateTime.compare(at, Clock.utc_now()) != :gt
+
   defp broadcast(%Config{} = config, topic, msg) do
     with server when not is_nil(server) <- server(config),
          true <- pubsub_loaded?() do
@@ -192,6 +251,11 @@ defmodule Durable.PubSub do
     else
       _ -> :ok
     end
+  rescue
+    # The PubSub is configured but not running (the host's is restarting, or
+    # stopped first on the way down). An event or a wake is only a hint: it
+    # mustn't fail the start, or the step, that sent it.
+    ArgumentError -> :ok
   end
 
   defp pubsub_loaded?, do: Code.ensure_loaded?(Phoenix.PubSub)

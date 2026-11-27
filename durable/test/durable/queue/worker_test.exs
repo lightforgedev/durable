@@ -42,7 +42,7 @@ defmodule Durable.Queue.WorkerTest do
       assert_receive {:done, ^ref}, 2_000
 
       # Worker emitted job_completed telemetry with status=:completed.
-      assert_receive {:event, :job_completed, %{duration_ms: dur},
+      assert_receive {:event, :job_completed, %{duration: dur},
                       %{status: :completed, job_id: ^wf_id}},
                      2_000
 
@@ -82,6 +82,25 @@ defmodule Durable.Queue.WorkerTest do
     end
   end
 
+  describe "the step's task dies" do
+    @tag :capture_log
+    test "TASK_CRASH uses the attempt and fails the run through the normal path" do
+      ref = "task-crash-#{System.unique_integer([:positive])}"
+      input = %{"action" => "TASK_CRASH", "ref" => ref, "bin_pid" => pid_to_bin()}
+
+      {:ok, wf_id} = Durable.start(SinkWorkflow, input)
+
+      with_backoff([total: 300, sleep: 10], fn ->
+        exec = Config.get(Durable).repo.get!(WorkflowExecution, wf_id)
+        assert exec.status == :failed
+        assert exec.error["type"] == "task_crash"
+        assert exec.locked_by == nil
+      end)
+
+      refute_received {:done, ^ref}
+    end
+  end
+
   describe "worker killed mid-step" do
     @tag :capture_log
     test "external kill leaves the lock, StaleJobRecovery rescues the row" do
@@ -116,6 +135,9 @@ defmodule Durable.Queue.WorkerTest do
       assert exec_before.locked_by != nil
       locked_at_before = exec_before.locked_at
 
+      # Otherwise the poller can reclaim the run between the sweep and the check.
+      :ok = Durable.pause_queue(:default)
+
       Process.exit(worker_pid, :kill)
 
       # The worker death never sends {:done, _}.
@@ -138,6 +160,12 @@ defmodule Durable.Queue.WorkerTest do
 
       # Stale recovery telemetry fired.
       assert_receive {:event, :stale_recovered, %{count: c}, _meta} when c >= 1, 500
+
+      # ...and it's on the operations record.
+      assert Enum.any?(
+               Durable.Activity.list!(),
+               &(&1.kind == "stale_recovered" and &1.count >= 1)
+             )
 
       # Row back to :pending, lock cleared. Use a generous backoff window —
       # if the previous recover_now didn't reach our row (e.g. a prior test

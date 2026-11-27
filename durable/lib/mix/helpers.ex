@@ -11,7 +11,17 @@ defmodule Durable.Mix.Helpers do
   end
 
   @doc """
-  Starts the application with queue processing disabled for diagnostic tasks.
+  Same as `ensure_started/0`, but forces Durable's queue processing off
+  for this BEAM. Use this for diagnostic/read-only tasks (inspect,
+  pending, doctor, list, status) so the short-lived mix process doesn't
+  claim queue jobs it can't finish — any unlocked job would otherwise
+  be immediately re-locked by the task's own poller and then orphaned
+  on task exit.
+
+  The override goes through `Application.put_env(:durable,
+  :disable_queue_processing, true)`, which `Durable.Config.new/1`
+  consults when the host app's supervisor tree boots. No effect on
+  other BEAMs (each OS process has its own app env).
   """
   def ensure_started_readonly do
     Application.put_env(:durable, :disable_queue_processing, true)
@@ -126,6 +136,14 @@ defmodule Durable.Mix.Helpers do
     String.replace_prefix(module_str, "Elixir.", "")
   end
 
+  @doc """
+  Resolves a workflow ID from a full UUID or a prefix. Returns `{:ok, id}`
+  when exactly one workflow matches, `{:error, :ambiguous, [ids]}` on
+  multiple matches, or `{:error, :not_found}`.
+
+  Operators rarely type full UUIDs; prefix lookup mirrors what they
+  already paste from `mix durable.list` truncated IDs.
+  """
   import Ecto.Query
 
   def resolve_workflow_id(durable_name, input) when is_binary(input) do
@@ -135,20 +153,27 @@ defmodule Durable.Mix.Helpers do
     if valid_uuid?(trimmed) do
       case Durable.Repo.get(config, Durable.Storage.Schemas.WorkflowExecution, trimmed) do
         nil -> {:error, :not_found}
-        execution -> {:ok, execution.id}
+        exec -> {:ok, exec.id}
       end
     else
       resolve_by_prefix(config, trimmed)
     end
   end
 
-  defp valid_uuid?(value), do: match?({:ok, _}, Ecto.UUID.cast(value))
+  defp valid_uuid?(str) do
+    case Ecto.UUID.cast(str) do
+      {:ok, _} -> true
+      :error -> false
+    end
+  end
 
   defp resolve_by_prefix(config, prefix) do
+    pattern = prefix <> "%"
+
     query =
-      from(workflow in Durable.Storage.Schemas.WorkflowExecution,
-        where: fragment("?::text LIKE ?", workflow.id, ^(prefix <> "%")),
-        select: workflow.id,
+      from(w in Durable.Storage.Schemas.WorkflowExecution,
+        where: fragment("?::text LIKE ?", w.id, ^pattern),
+        select: w.id,
         limit: 10
       )
 

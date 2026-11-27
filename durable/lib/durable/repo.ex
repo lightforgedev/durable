@@ -22,8 +22,51 @@ defmodule Durable.Repo do
   """
 
   alias Durable.Config
-  alias Durable.Storage.Dialect
   alias Ecto.Adapters.SQL
+
+  @doc false
+  # Whether this could be a run's id. Anything else can't match a row, and would
+  # raise from the query instead of saying so.
+  @spec id?(term()) :: boolean()
+  def id?(value),
+    do: is_binary(value) and byte_size(value) == 36 and Ecto.UUID.cast(value) != :error
+
+  @doc false
+  # Whether this says nothing about what was written, so a try later may go
+  # through: the connection went, or the database gave up on the statement
+  # (a statement or lock timeout, a deadlock, a serialization failure) rather
+  # than refusing it. A dropped connection is DBConnection's error directly,
+  # and through PgBouncer a FATAL from the pooler, such as "server conn
+  # crashed?".
+  @spec transient?(term()) :: boolean()
+  def transient?(%DBConnection.ConnectionError{}), do: true
+
+  def transient?(%Postgrex.Error{postgres: %{severity: severity}})
+      when severity in ["FATAL", "PANIC"],
+      do: true
+
+  def transient?(%Postgrex.Error{postgres: %{pg_code: "08" <> _}}), do: true
+
+  def transient?(%Postgrex.Error{postgres: %{pg_code: code}})
+      when code in ["57014", "40P01", "55P03", "40001"],
+      do: true
+
+  def transient?(_error), do: false
+
+  @doc false
+  # A name Postgres can't hold as text, so it can't match a row or be stored.
+  @spec bad_text?(term()) :: boolean()
+  def bad_text?(value) when is_atom(value), do: bad_text?(Atom.to_string(value))
+
+  def bad_text?(value) when is_binary(value),
+    do: not String.valid?(value) or String.contains?(value, <<0>>)
+
+  # A list can reach the database as text too, through to_string/1 or a filter.
+  def bad_text?(value) when is_list(value) do
+    not List.improper?(value) and Enum.any?(value, &(&1 == 0 or bad_text?(&1)))
+  end
+
+  def bad_text?(_value), do: false
 
   @doc """
   Returns the default options to apply to all Ecto operations.
@@ -127,13 +170,17 @@ defmodule Durable.Repo do
     config.repo.delete_all(queryable, merge_opts(config, opts))
   end
 
-  @doc """
-  Runs an `Ecto.Multi` or function transaction using the configured repo.
+  # ============================================================================
+  # Transactions
+  # ============================================================================
 
-  On SQLite the transaction starts `IMMEDIATE` (see `Durable.Storage.Dialect`).
+  @doc """
+  Runs an `Ecto.Multi` (or a function) inside a database transaction on the
+  configured repo. Used to atomically couple state transitions (e.g. marking
+  a PendingInput `:timeout` and resuming the workflow it belongs to) so a
+  crash between the two updates can't orphan the workflow.
   """
   def transaction(%Config{} = config, fun_or_multi, opts \\ []) do
-    opts = Keyword.merge(Dialect.transaction_opts(config), opts)
     config.repo.transaction(fun_or_multi, merge_opts(config, opts))
   end
 

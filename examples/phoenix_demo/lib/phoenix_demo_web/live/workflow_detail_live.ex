@@ -32,7 +32,7 @@ defmodule PhoenixDemoWeb.WorkflowDetailLive do
            active_nav: :executions,
            workflow: workflow,
            steps: get_steps(id),
-           children: Durable.list_children(id)
+           children: Durable.list_children!(id)
          )}
     end
   end
@@ -47,7 +47,7 @@ defmodule PhoenixDemoWeb.WorkflowDetailLive do
     id = socket.assigns.workflow.id
     workflow = get_workflow(id)
     steps = get_steps(id)
-    children = Durable.list_children(id)
+    children = Durable.list_children!(id)
 
     {:noreply, assign(socket, workflow: workflow, steps: steps, children: children)}
   end
@@ -166,10 +166,22 @@ defmodule PhoenixDemoWeb.WorkflowDetailLive do
             </div>
 
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3 text-xs">
-              <div><span class="text-base-content/60">Created:</span> {format_time(@workflow.inserted_at)}</div>
-              <div><span class="text-base-content/60">Started:</span> {format_time(@workflow.started_at)}</div>
-              <div><span class="text-base-content/60">Completed:</span> {format_time(@workflow.completed_at)}</div>
-              <div :if={@workflow.scheduled_at}><span class="text-base-content/60">Scheduled:</span> {format_time(@workflow.scheduled_at)}</div>
+              <div>
+                <span class="text-base-content/60">Created:</span> {format_time(@workflow.inserted_at)}
+              </div>
+              <div>
+                <span class="text-base-content/60">Started:</span> {format_time(@workflow.started_at)}
+              </div>
+              <div>
+                <span class="text-base-content/60">Completed:</span> {format_time(
+                  @workflow.completed_at
+                )}
+              </div>
+              <div :if={@workflow.scheduled_at}>
+                <span class="text-base-content/60">Scheduled:</span> {format_time(
+                  @workflow.scheduled_at
+                )}
+              </div>
             </div>
           </div>
         </div>

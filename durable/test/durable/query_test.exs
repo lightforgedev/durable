@@ -41,14 +41,14 @@ defmodule Durable.QueryTest do
       _c2 = insert_exec(repo, %{workflow_name: "fan_out", parent_workflow_id: parent.id})
       other = insert_exec(repo, %{workflow_name: "lonely", status: :running})
 
-      top = Query.list_executions(top_level_only: true)
+      top = Query.list_executions!(top_level_only: true)
       top_ids = MapSet.new(top, & &1.id)
 
       assert MapSet.member?(top_ids, parent.id)
       assert MapSet.member?(top_ids, other.id)
       refute Enum.any?(top, &(&1.parent_workflow_id != nil))
 
-      kids = Query.list_executions(parent_workflow_id: parent.id)
+      kids = Query.list_executions!(parent_workflow_id: parent.id)
       assert length(kids) == 2
       assert Enum.all?(kids, &(&1.parent_workflow_id == parent.id))
     end
@@ -60,7 +60,7 @@ defmodule Durable.QueryTest do
       insert_exec(repo, %{workflow_name: "p", parent_workflow_id: parent.id})
       insert_exec(repo, %{workflow_name: "p", parent_workflow_id: parent.id})
 
-      {rows, total} = Query.list_executions_with_total(top_level_only: true)
+      {rows, total} = Query.list_executions_with_total!(top_level_only: true)
 
       assert total == Enum.count(rows)
       assert Enum.all?(rows, &is_nil(&1.parent_workflow_id))
@@ -80,7 +80,7 @@ defmodule Durable.QueryTest do
         })
       end
 
-      row = Enum.find(Query.list_workflows(), &(&1.workflow_name == "fan_out"))
+      row = Enum.find(Query.list_workflows!(), &(&1.workflow_name == "fan_out"))
 
       assert row, "fan_out definition should appear in the catalog"
       # Exactly one top-level run, not 6.
@@ -97,7 +97,7 @@ defmodule Durable.QueryTest do
       insert_exec(repo, %{parent_workflow_id: p1.id})
       insert_exec(repo, %{parent_workflow_id: p2.id})
 
-      counts = Query.child_counts([p1.id, p2.id, p3.id])
+      counts = Query.child_counts!([p1.id, p2.id, p3.id])
 
       assert counts[p1.id] == 2
       assert counts[p2.id] == 1
@@ -105,7 +105,7 @@ defmodule Durable.QueryTest do
     end
 
     test "empty parent list short-circuits to %{}" do
-      assert Query.child_counts([]) == %{}
+      assert Query.child_counts!([]) == %{}
     end
   end
 
@@ -120,6 +120,55 @@ defmodule Durable.QueryTest do
       {:ok, parent_map} = Query.get_execution(parent.id)
       assert parent_map.parent_workflow_id == nil
     end
+
+    # Cancelled while its worker ran a step, a run keeps the worker's lock
+    # until the worker stops: what the dashboard shows as stopping.
+    test "says whether a run keeps the lock of a worker that hasn't stopped", %{repo: repo} do
+      now = DateTime.utc_now()
+
+      running =
+        insert_exec(repo, %{
+          status: :running,
+          started_at: now,
+          locked_by: "node-a",
+          locked_at: now,
+          lock_token: Ecto.UUID.generate()
+        })
+
+      assert %{kept_lock: false, locked_by: "node-a", locked_at: %DateTime{}} =
+               Query.get_execution!(running.id)
+
+      :ok = Durable.cancel(running.id, "wrong account")
+      assert %{status: :cancelled, kept_lock: true} = Query.get_execution!(running.id)
+
+      assert %{kept_lock: false} =
+               Query.get_execution!(insert_exec(repo, %{status: :cancelled}).id)
+    end
+  end
+
+  defmodule Orders do
+    use Durable
+
+    workflow "orders" do
+      step :a, fn data -> {:ok, data} end
+    end
+  end
+
+  defmodule Refunds do
+    use Durable
+
+    workflow "refunds" do
+      step :a, fn data -> {:ok, data} end
+    end
+  end
+
+  describe "workflow filter" do
+    test "matches the runs of a workflow module" do
+      {:ok, id} = Durable.start(Orders, %{})
+      {:ok, _} = Durable.start(Refunds, %{})
+
+      assert [%{id: ^id}] = Query.list_executions!(workflow: Orders)
+    end
   end
 
   describe "id / id_prefix / status-list / time filters" do
@@ -127,7 +176,7 @@ defmodule Durable.QueryTest do
       a = insert_exec(repo, %{workflow_name: "a"})
       _b = insert_exec(repo, %{workflow_name: "b"})
 
-      rows = Query.list_executions(id: a.id)
+      rows = Query.list_executions!(id: a.id)
 
       assert Enum.map(rows, & &1.id) == [a.id]
     end
@@ -137,7 +186,7 @@ defmodule Durable.QueryTest do
       _b = insert_exec(repo, %{workflow_name: "b"})
       prefix = String.slice(a.id, 0, 8)
 
-      rows = Query.list_executions(id_prefix: prefix)
+      rows = Query.list_executions!(id_prefix: prefix)
 
       assert Enum.any?(rows, &(&1.id == a.id))
       assert Enum.all?(rows, &String.starts_with?(&1.id, prefix))
@@ -148,7 +197,7 @@ defmodule Durable.QueryTest do
       r = insert_exec(repo, %{status: :running})
       _c = insert_exec(repo, %{status: :completed})
 
-      rows = Query.list_executions(status: [:failed, :running])
+      rows = Query.list_executions!(status: [:failed, :running])
       ids = MapSet.new(rows, & &1.id)
 
       assert MapSet.member?(ids, f.id)
@@ -160,7 +209,7 @@ defmodule Durable.QueryTest do
       f = insert_exec(repo, %{status: :failed})
       _c = insert_exec(repo, %{status: :completed})
 
-      rows = Query.list_executions(status: :failed)
+      rows = Query.list_executions!(status: :failed)
 
       assert Enum.any?(rows, &(&1.id == f.id))
       assert Enum.all?(rows, &(&1.status == :failed))
@@ -174,11 +223,67 @@ defmodule Durable.QueryTest do
 
       recent = insert_exec(repo, %{workflow_name: "recent"})
 
-      rows = Query.list_executions(from: DateTime.add(now, -60, :second))
+      rows = Query.list_executions!(from: DateTime.add(now, -60, :second))
       ids = MapSet.new(rows, & &1.id)
 
       assert MapSet.member?(ids, recent.id)
       refute MapSet.member?(ids, old.id)
+    end
+  end
+
+  describe "search filters" do
+    defp ids(filters), do: filters |> Query.list_executions!() |> MapSet.new(& &1.id)
+
+    test "current_step, trigger and error_contains", %{repo: repo} do
+      shipping =
+        insert_exec(repo,
+          status: :failed,
+          current_step: "ship_order",
+          error: %{"type" => "RuntimeError", "message" => "carrier returned 503"}
+        )
+
+      returned =
+        insert_exec(repo,
+          status: :failed,
+          current_step: "charge",
+          error: %{"reason" => "Card declined: 50% limit_hit"},
+          trigger: :schedule,
+          trigger_ref: "nightly"
+        )
+
+      assert ids(current_step: "ship_order") == MapSet.new([shipping.id])
+      assert ids(trigger: :schedule) == MapSet.new([returned.id])
+      assert ids(trigger_ref: "nightly") == MapSet.new([returned.id])
+      assert ids(error_contains: "CARRIER") == MapSet.new([shipping.id])
+      assert ids(error_contains: "declined") == MapSet.new([returned.id])
+
+      # LIKE wildcards in the search text are literal, not patterns.
+      assert ids(error_contains: "50%") == MapSet.new([returned.id])
+      assert ids(error_contains: "_") == MapSet.new([returned.id])
+    end
+
+    test "input matches exact values by dotted path", %{repo: repo} do
+      gold = insert_exec(repo, input: %{"order_id" => "ORD-1", "customer" => %{"tier" => "gold"}})
+
+      _silver =
+        insert_exec(repo, input: %{"order_id" => "ORD-2", "customer" => %{"tier" => "silver"}})
+
+      numeric = insert_exec(repo, input: %{"order_id" => 42})
+
+      assert ids(input: %{"order_id" => "ORD-1"}) == MapSet.new([gold.id])
+      assert ids(input: %{"customer.tier" => "gold"}) == MapSet.new([gold.id])
+      assert ids(input: %{"order_id" => 42}) == MapSet.new([numeric.id])
+      assert ids(input: %{"order_id" => "ORD-1", "customer.tier" => "silver"}) == MapSet.new()
+    end
+
+    test "count_by_status ignores the status filter but honours the rest", %{repo: repo} do
+      insert_exec(repo, status: :failed, workflow_name: "a")
+      insert_exec(repo, status: :failed, workflow_name: "a")
+      insert_exec(repo, status: :completed, workflow_name: "a")
+      insert_exec(repo, status: :failed, workflow_name: "b")
+
+      assert Query.count_by_status!(workflow_name: "a", status: [:completed]) ==
+               %{failed: 2, completed: 1}
     end
   end
 end

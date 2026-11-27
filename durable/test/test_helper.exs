@@ -6,10 +6,9 @@
 # (FOR UPDATE SKIP LOCKED, FOR UPDATE row locks) that the shared SQL Sandbox
 # structurally cannot. They truncate tables, so they must run in isolation —
 # excluded from the default suite, run with `mix test --only integration`.
-# `:postgres_only` tests exercise PostgreSQL schemas (prefixes), which SQLite
-# does not have. They are skipped when DURABLE_TEST_DB=sqlite.
-postgres_only = if System.get_env("DURABLE_TEST_DB") == "sqlite", do: [:postgres_only], else: []
-ExUnit.start(exclude: [:integration | postgres_only])
+# `:fuzz` tests do the same with generated inputs: `mix test --only fuzz`, with
+# FUZZ_RUNS=n for more cases and `--seed` to replay a failure.
+ExUnit.start(exclude: [:integration, :fuzz])
 
 Ecto.Adapters.SQL.Sandbox.mode(Durable.TestRepo, :manual)
 
@@ -20,7 +19,7 @@ Ecto.Adapters.SQL.Sandbox.mode(Durable.TestRepo, :manual)
 # lazily-loaded error-code table (`Postgrex.ErrorCode`, used when mapping a DB
 # error such as a unique violation). The build is settled here and we're still
 # single-threaded, so eagerly load those apps' modules before any test runs.
-for app <- [:durable, :postgrex, :exqlite, :ecto_sqlite3],
+for app <- [:durable, :postgrex],
     mod <- Application.spec(app, :modules) || [] do
   Code.ensure_loaded(mod)
 end

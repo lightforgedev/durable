@@ -44,18 +44,25 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
         <Core.local_time
           at={@entry["timestamp"]}
           format="time"
-          class="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground/70"
+          class="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground"
         />
         <span class={["w-12 shrink-0 font-semibold uppercase", level_class(@level)]}>{@entry["level"] || "—"}</span>
         <span
           :if={@show_step}
-          class="hidden shrink-0 truncate text-muted-foreground/55 md:inline md:max-w-[150px]"
+          class="hidden shrink-0 truncate text-muted-foreground md:inline md:max-w-[150px]"
+          data-tip-title="Step"
+          data-tip={@entry["__step__"]}
         >{@entry["__step__"]}</span>
         <span class="min-w-0 flex-1 break-words text-foreground/90">{inline_message(@parsed, @entry["message"])}</span>
-        <span :if={@labels != ""} class="hidden shrink-0 whitespace-nowrap text-[10px] text-muted-foreground/45 group-open/row:hidden lg:inline">{@labels}</span>
+        <span
+          :if={@labels != ""}
+          class="hidden shrink-0 whitespace-nowrap text-[11px] text-muted-foreground group-open/row:hidden lg:inline"
+          data-tip-title="Logger metadata"
+          data-tip={meta_lines(@entry)}
+        >{@labels}</span>
         <Core.icon
           name="chevron-down"
-          class="size-3 shrink-0 self-center text-muted-foreground/40 transition-transform group-open/row:rotate-180"
+          class="size-3 shrink-0 self-center text-muted-foreground transition-transform group-open/row:rotate-180"
         />
       </summary>
 
@@ -95,14 +102,16 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
   # Level styling
   # ============================================================================
 
-  def level_class("error"), do: "text-destructive"
+  def level_class(level) when level in ~w(error critical alert emergency), do: "text-destructive"
   def level_class("warning"), do: "text-warning"
-  def level_class("info"), do: "text-info"
+  def level_class(level) when level in ~w(info notice), do: "text-info"
   def level_class("debug"), do: "text-muted-foreground"
   def level_class(_), do: "text-muted-foreground"
 
   # Per-level left-bar accent + faint row tint so error/warning stand out.
-  defp row_tint("error"), do: "border-l-destructive bg-destructive/5"
+  defp row_tint(level) when level in ~w(error critical alert emergency),
+    do: "border-l-destructive bg-destructive/5"
+
   defp row_tint("warning"), do: "border-l-warning bg-warning/5"
   defp row_tint("info"), do: "border-l-info/50"
   defp row_tint("debug"), do: "border-l-border"
@@ -113,9 +122,10 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
   # ============================================================================
 
   # Meaningful metadata as a compact inline `key=value` string. Framework /
-  # source-location internals are filtered so the lines stay clean.
+  # source-location internals, and the run details every line now carries, are
+  # filtered so the lines stay clean.
   @noise_meta ~w(line module function file pid mfa domain gl time application erl_level
-                 otel_span_id otel_trace_id ansi_color)
+                 otel_span_id otel_trace_id ansi_color workflow workflow_id step attempt)
   def meta_labels(entry) do
     case entry["metadata"] do
       m when is_map(m) and map_size(m) > 0 ->
@@ -126,6 +136,13 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
       _ ->
         ""
     end
+  end
+
+  # The same pairs in full, one per line, for the labels' tooltip.
+  defp meta_lines(entry) do
+    entry["metadata"]
+    |> Enum.reject(fn {k, _} -> to_string(k) in @noise_meta end)
+    |> Enum.map_join("\n", fn {k, v} -> "#{k}=#{if is_binary(v), do: v, else: inspect(v)}" end)
   end
 
   defp inline_value(v) when is_binary(v) or is_number(v) or is_atom(v) do
@@ -178,9 +195,9 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
   def parse_message(msg) when is_binary(msg) do
     trimmed = String.trim(msg)
 
-    cond do
-      term = whole_term(trimmed) -> {:term, term}
-      true -> prefix_term(msg)
+    case whole_term(trimmed) do
+      nil -> prefix_term(msg)
+      term -> {:term, term}
     end
   end
 

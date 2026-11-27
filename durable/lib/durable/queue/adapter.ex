@@ -95,6 +95,13 @@ defmodule Durable.Queue.Adapter do
               {:ok, non_neg_integer()} | {:error, term()}
 
   @doc """
+  Puts every run a node holds back on its queue, for a node that's stopping.
+  Returns the count released.
+  """
+  @callback release_node_jobs(config :: Config.t(), node_id :: String.t()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+
+  @doc """
   Returns statistics for a queue.
 
   Returns a map with counts by status and other metrics.
@@ -131,7 +138,7 @@ defmodule Durable.Queue.Adapter do
 
   Atomically transitions rows where `status = :waiting AND scheduled_at <= NOW()`
   back to `:pending`, clears the lock, and merges a `__sleep_satisfied__`
-  marker into context so the step body's next `sleep`/`schedule_at` call
+  marker into engine_state so the step body's next `sleep`/`schedule_at` call
   returns immediately instead of re-throwing.
 
   Returns the count of workflows woken. Optional so older adapters keep
@@ -140,28 +147,19 @@ defmodule Durable.Queue.Adapter do
   @callback wake_sleeping_workflows(config :: Config.t(), batch_size :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
 
+  @doc """
+  Lets go of a run cancelled to be undone while this worker ran it, once its
+  step has stopped.
+  """
+  @callback let_go(config :: Config.t(), job_id :: job_id()) :: :ok
+
   @optional_callbacks recover_zombie_workflows: 2, wake_sleeping_workflows: 2
 
   @doc """
   Returns the default adapter module.
   """
   @spec default_adapter() :: module()
-  def default_adapter, do: Durable.Queue.Adapters.Postgres
-
-  @doc """
-  Returns the default adapter for a storage dialect (`:postgres` or `:sqlite`).
-  """
-  @spec default_adapter(Durable.Storage.Dialect.t()) :: module()
-  def default_adapter(:postgres), do: Durable.Queue.Adapters.Postgres
-  def default_adapter(:sqlite), do: Durable.Queue.Adapters.SQLite
-
-  @doc """
-  Returns the adapter a Durable instance uses: `config.queue_adapter`, or
-  the PostgreSQL adapter for configs built without one.
-  """
-  @spec for_config(Config.t()) :: module()
-  def for_config(%Config{queue_adapter: adapter}) when is_atom(adapter) and adapter != nil,
-    do: adapter
-
-  def for_config(%Config{}), do: default_adapter()
+  def default_adapter do
+    Durable.Queue.Adapters.Postgres
+  end
 end

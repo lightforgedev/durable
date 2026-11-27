@@ -11,12 +11,12 @@ defmodule Durable.Orchestration do
 
       defmodule MyApp.OrderWorkflow do
         use Durable
-        use Durable.Context
+        use Durable.Helpers
         use Durable.Orchestration
 
         workflow "process_order" do
           step :charge_payment, fn data ->
-            case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total},
+            case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data["total"]},
                    timeout: hours(1)) do
               {:ok, result} ->
                 {:ok, assign(data, :payment_id, result["payment_id"])}
@@ -27,7 +27,7 @@ defmodule Durable.Orchestration do
 
           step :send_email, fn data ->
             {:ok, email_wf_id} = start_workflow(MyApp.EmailWorkflow,
-              %{"to" => data.email}, ref: :confirmation)
+              %{"to" => data["email"]}, ref: :confirmation)
             {:ok, assign(data, :email_workflow_id, email_wf_id)}
           end
         end
@@ -37,15 +37,13 @@ defmodule Durable.Orchestration do
 
   alias Durable.Config
   alias Durable.Context
+  alias Durable.EngineState
   alias Durable.Executor
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
-  alias Durable.Storage.Schemas.WorkflowExecution
+  alias Durable.Storage.Schemas.{PendingEvent, WorkflowExecution}
 
-  @children_key :__children
-  @child_results_key :__child_results
-  @max_child_refs 100
-  @max_ref_bytes 200
-  @ref_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._:\/-]*\z/
+  import Ecto.Query, only: [from: 2]
 
   @doc """
   Injects orchestration functions into the calling module.
@@ -70,9 +68,20 @@ defmodule Durable.Orchestration do
   - `:timeout_value` - Value returned on timeout (default: `:child_timeout`)
   - `:queue` - Queue for the child workflow (default: "default")
   - `:durable` - Durable instance name (default: Durable)
-  - `:after_start` - callback invoked with the persisted child execution before it
-    is allowed to run. It must return `:ok` or `{:error, reason}`. A callback
-    failure deletes the child and fails the parent call.
+
+  ## What the parent sees on success
+
+  The `result` returned on success is the child workflow's **entire final
+  context**, not just its explicit outputs. This includes every
+  `put_context/2` key the child set, plus the final step's return value.
+
+  If you need to expose only specific outputs, return a clean shape from the
+  child's final step or pick only the keys you need in the parent:
+
+      case call_workflow(MyApp.PaymentWorkflow, %{"amount" => 100}) do
+        {:ok, %{"payment_id" => id}} -> {:ok, assign(data, :payment_id, id)}
+        {:error, reason} -> {:error, reason}
+      end
 
   ## Examples
 
@@ -85,18 +94,30 @@ defmodule Durable.Orchestration do
   @spec call_workflow(module(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def call_workflow(module, input, opts \\ []) do
     parent_id = Context.workflow_id()
-    ref = normalize_ref!(Keyword.get(opts, :ref, module_to_ref(module)))
-    context = Process.get(:durable_context, %{})
+    ref = Keyword.get(opts, :ref, module_to_ref(module))
+    child_key = child_context_key(ref)
+    result_key = child_result_key(ref)
 
-    case {fetch_child_result(context, ref), fetch_child(context, ref)} do
-      {{:ok, result}, _child} ->
+    # Which children this run has started, and what they ended with, is the
+    # engine's state: nothing in the step's data can stand in for a child.
+    engine_state = EngineState.current()
+
+    case {Map.fetch(engine_state, result_key), Map.fetch(engine_state, child_key)} do
+      {{:ok, %{"status" => "completed"} = result}, _child} ->
         parse_child_result(result)
 
-      {:error, {:ok, child_id}} ->
-        handle_existing_child(child_id, opts)
+      # A failure the parent was told about may be out of date: the child can
+      # have been retried since, so its row has the last word.
+      {_result, {:ok, child_id}} ->
+        if timed_out?(engine_state, child_id, opts),
+          do: {:ok, Keyword.get(opts, :timeout_value, :child_timeout)},
+          else: handle_existing_child(child_id, opts)
+
+      {{:ok, result}, :error} ->
+        parse_child_result(result)
 
       {:error, :error} ->
-        create_and_wait(module, input, parent_id, ref, opts)
+        create_and_wait(module, input, parent_id, child_key, opts)
     end
   end
 
@@ -121,108 +142,74 @@ defmodule Durable.Orchestration do
   @spec start_workflow(module(), map(), keyword()) :: {:ok, String.t()}
   def start_workflow(module, input, opts \\ []) do
     parent_id = Context.workflow_id()
-    ref = normalize_ref!(Keyword.get(opts, :ref, module_to_ref(module)))
-    context = Process.get(:durable_context, %{})
+    ref = Keyword.get(opts, :ref, module_to_ref(module))
+    fire_key = fire_forget_key(ref)
 
-    case fetch_child(context, ref) do
+    case Map.fetch(EngineState.current(), fire_key) do
+      # Idempotent: already created
       {:ok, child_id} ->
         {:ok, child_id}
 
+      # Create child and continue (no throw)
       :error ->
-        ensure_registry_capacity!(context)
-
-        with {:ok, child_id} <- create_child_execution(module, input, parent_id, opts) do
-          put_child(context, ref, child_id)
-          {:ok, child_id}
-        end
+        create_child_execution(module, input, {parent_id, fire_key, :fire}, [wake: true] ++ opts)
     end
   end
 
-  defp create_and_wait(module, input, parent_id, ref, opts) do
-    context = Process.get(:durable_context, %{})
-    ensure_registry_capacity!(context)
+  # The step → child mapping in the parent's engine state, with this child
+  # added, so the dashboard can attach a drill-in chevron to the calling step.
+  # Mirrors the `__parallel_children` pattern used by parallel steps in
+  # `lib/durable/executor.ex`.
+  defp call_children(child_id, kind, ref) do
+    step_name = Context.current_step()
 
-    with {:ok, child_id} <- create_child_execution(module, input, parent_id, opts) do
-      put_child(context, ref, child_id)
+    meta = %{
+      "step_name" => step_name && Atom.to_string(step_name),
+      "kind" => Atom.to_string(kind),
+      "ref" => to_string(ref)
+    }
 
-      throw(
-        {:call_workflow,
-         child_id: child_id,
-         timeout: Keyword.get(opts, :timeout),
-         timeout_value: Keyword.get(opts, :timeout_value, :child_timeout)}
+    Map.put(EngineState.current()["__call_children"] || %{}, child_id, meta)
+  end
+
+  # ============================================================================
+  # Helpers
+  # ============================================================================
+
+  defp create_and_wait(module, input, parent_id, child_key, opts) do
+    {:ok, child_id} = create_child_execution(module, input, {parent_id, child_key, :call}, opts)
+
+    throw(
+      {:call_workflow,
+       child_id: child_id,
+       timeout: Keyword.get(opts, :timeout),
+       timeout_value: Keyword.get(opts, :timeout_value, :child_timeout)}
+    )
+  end
+
+  # The worker that timed out the wait cancels the child, so what the child
+  # did last says nothing about this call: the timeout has to be noticed first.
+  # The wait's own row says so. `__timeout__` doesn't: it is whichever wait of
+  # the step timed out, and an earlier one may have.
+  defp timed_out?(engine_state, child_id, opts) do
+    is_map_key(engine_state, child_event_name(child_id)) and
+      wait_status(child_id, opts) == :timeout
+  end
+
+  defp wait_status(child_id, opts) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+    event = child_event_name(child_id)
+
+    Repo.one(
+      config,
+      from(p in PendingEvent,
+        where: p.workflow_id == ^Context.workflow_id() and p.event_name == ^event,
+        order_by: [desc: p.inserted_at],
+        limit: 1,
+        select: p.status
       )
-    end
+    )
   end
-
-  defp put_child(context, ref, child_id) do
-    children =
-      context
-      |> child_registry()
-      |> Map.put(ref, child_id)
-
-    Context.put_context(@children_key, children)
-  end
-
-  defp fetch_child(context, ref) do
-    case Map.fetch(child_registry(context), ref) do
-      {:ok, child_id} ->
-        {:ok, child_id}
-
-      :error ->
-        fetch_legacy_child(context, ref)
-    end
-  end
-
-  defp fetch_child_result(context, ref) do
-    case Map.fetch(child_result_registry(context), ref) do
-      {:ok, result} -> {:ok, result}
-      :error -> fetch_legacy_result(context, ref)
-    end
-  end
-
-  defp child_registry(context),
-    do: Map.get(context, @children_key) || Map.get(context, Atom.to_string(@children_key)) || %{}
-
-  defp child_result_registry(context),
-    do:
-      Map.get(context, @child_results_key) ||
-        Map.get(context, Atom.to_string(@child_results_key)) || %{}
-
-  defp fetch_legacy_child(context, ref), do: fetch_legacy(context, "__child:" <> ref)
-  defp fetch_legacy_result(context, ref), do: fetch_legacy(context, "__child_done:" <> ref)
-
-  defp fetch_legacy(context, expected_key) do
-    Enum.find_value(context, :error, fn
-      {key, value} when is_atom(key) ->
-        if Atom.to_string(key) == expected_key, do: {:ok, value}
-
-      {^expected_key, value} ->
-        {:ok, value}
-
-      _ ->
-        nil
-    end)
-  end
-
-  defp ensure_registry_capacity!(context) do
-    if map_size(child_registry(context)) >= @max_child_refs do
-      raise ArgumentError, "child workflow ref limit exceeded (max #{@max_child_refs})"
-    end
-  end
-
-  defp normalize_ref!(ref) when is_atom(ref), do: ref |> Atom.to_string() |> normalize_ref!()
-
-  defp normalize_ref!(ref) when is_binary(ref) do
-    if byte_size(ref) in 1..@max_ref_bytes and Regex.match?(@ref_pattern, ref) do
-      ref
-    else
-      raise ArgumentError,
-            "child workflow ref must be 1-#{@max_ref_bytes} bytes and contain only letters, digits, '.', '_', ':', '/', or '-'"
-    end
-  end
-
-  defp normalize_ref!(ref),
-    do: raise(ArgumentError, "child workflow ref must be an atom or string, got: #{inspect(ref)}")
 
   defp handle_existing_child(child_id, opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
@@ -235,7 +222,8 @@ defmodule Durable.Orchestration do
       %{status: :completed} = child ->
         parse_child_result(build_result_payload(:completed, child.context))
 
-      %{status: status} = child when status in [:failed, :cancelled, :compensation_failed] ->
+      %{status: status} = child
+      when status in [:failed, :cancelled, :compensated, :compensation_failed] ->
         parse_child_result(build_result_payload(:failed, child.error))
 
       _child ->
@@ -249,60 +237,84 @@ defmodule Durable.Orchestration do
     end
   end
 
-  defp create_child_execution(module, input, parent_id, opts) do
+  # `key` is the name the parent knows the child by, in its engine state.
+  defp create_child_execution(module, input, {parent_id, key, kind}, opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
     {:ok, workflow_def} = get_child_workflow_def(module, opts)
+
+    safe_input =
+      case Executor.storable_input(input) do
+        {:ok, map} ->
+          map
+
+        {:error, :invalid_input} ->
+          raise ArgumentError, "child input must be a map: #{inspect(input)}"
+      end
 
     attrs = %{
       workflow_module: Atom.to_string(module),
       workflow_name: workflow_def.name,
       status: :pending,
       queue: Keyword.get(opts, :queue, "default") |> to_string(),
-      priority: Keyword.get(opts, :priority, 0),
-      input: input,
+      priority: Keyword.get(opts, :priority) || 0,
+      input: safe_input,
       context: %{},
-      parent_workflow_id: parent_id
+      parent_workflow_id: parent_id,
+      root_workflow_id: Map.get(Durable.Telemetry.run_meta(), :root_workflow_id, parent_id),
+      trigger: :parent,
+      deadline_at: Executor.deadline(workflow_def, nil)
     }
 
-    {:ok, execution} =
-      %WorkflowExecution{}
-      |> WorkflowExecution.changeset(attrs)
-      |> Repo.insert(config)
+    # The parent's row gets the child under `key` in the same transaction: a
+    # parent lost between the two would start another child when its step
+    # ran again, and the first would run with nobody to know it. Which step
+    # called it goes with it: the step that runs again finds its child, and
+    # doesn't record it a second time.
+    ref = Keyword.get(opts, :ref, module_to_ref(module))
 
-    with :ok <- after_start(opts, execution.id) do
-      # For inline execution (testing), execute the child immediately.
-      if Keyword.get(opts, :inline, false) do
-        Executor.execute_workflow(execution.id, config)
-      end
+    {:ok, {execution, recorded}} =
+      Repo.transaction(config, fn ->
+        {:ok, child} =
+          %WorkflowExecution{} |> WorkflowExecution.changeset(attrs) |> Repo.insert(config)
 
-      {:ok, execution.id}
-    else
-      {:error, reason} ->
-        # A child without its required host-side registration (for example an
-        # org ownership tag) must never become runnable. Delete it before
-        # returning the error to the parent.
-        _ = Repo.delete(execution, config)
-        {:error, {:child_start_callback_failed, reason}}
+        recorded = %{key => child.id, "__call_children" => call_children(child.id, kind, ref)}
+        record_child(config, parent_id, recorded)
+        {child, recorded}
+      end)
+
+    for {name, value} <- recorded, do: EngineState.put_current(name, value)
+
+    # A child its parent waits for is woken once the parent is listening.
+    if Keyword.get(opts, :wake, false), do: DurablePubSub.wake(config, execution)
+
+    # For inline execution (testing), execute the child immediately
+    # It runs in this process, as a run of its own: this step's view of its
+    # own run's state is put back after it.
+    if Keyword.get(opts, :inline, false) do
+      engine_state = EngineState.current()
+      Executor.execute_workflow(execution.id, config)
+      EngineState.put_current(engine_state)
     end
+
+    {:ok, execution.id}
   end
 
-  defp after_start(opts, child_id) do
-    case Keyword.get(opts, :after_start) do
-      nil ->
-        :ok
+  # Added to what the row has, not written over it: the step's own save writes
+  # the whole state later, and has the child too. The step is the only writer
+  # of `__call_children`, so its process has all of it.
+  defp record_child(_config, nil, _child), do: :ok
 
-      callback when is_function(callback, 1) ->
-        case callback.(child_id) do
-          :ok -> :ok
-          {:error, _reason} = error -> error
-          other -> {:error, {:invalid_after_start_result, other}}
-        end
-
-      _ ->
-        {:error, :invalid_after_start_callback}
-    end
+  defp record_child(config, parent_id, child) do
+    Repo.update_all(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^parent_id,
+        update: [set: [engine_state: fragment("? || ?", w.engine_state, type(^child, :map))]]
+      ),
+      []
+    )
   end
 
   defp get_child_workflow_def(module, opts) do
@@ -313,48 +325,16 @@ defmodule Durable.Orchestration do
   end
 
   @doc false
-  def child_context_key(ref), do: "__child:#{normalize_ref!(ref)}"
+  def child_context_key(ref), do: "__child:#{ref}"
 
   @doc false
-  def child_result_key(ref), do: "__child_done:#{normalize_ref!(ref)}"
+  def child_result_key(ref), do: "__child_done:#{ref}"
 
   @doc false
   def child_event_name(child_id), do: "__child_done:#{child_id}"
 
   @doc false
-  def fire_forget_key(ref), do: "__fire_forget:#{normalize_ref!(ref)}"
-
-  @doc false
-  def result_context(parent_context, child_id, payload) do
-    ref =
-      Enum.find_value(child_registry(parent_context), fn
-        {ref, ^child_id} -> ref
-        _ -> nil
-      end) || legacy_ref_for_child(parent_context, child_id)
-
-    if ref do
-      results = Map.put(child_result_registry(parent_context), ref, payload)
-      %{Atom.to_string(@child_results_key) => results}
-    else
-      %{}
-    end
-  end
-
-  defp legacy_ref_for_child(context, child_id) do
-    Enum.find_value(context, fn
-      {key, ^child_id} when is_atom(key) ->
-        case Atom.to_string(key) do
-          "__child:" <> ref -> ref
-          _ -> nil
-        end
-
-      {"__child:" <> ref, ^child_id} ->
-        ref
-
-      _ ->
-        nil
-    end)
-  end
+  def fire_forget_key(ref), do: "__fire_forget:#{ref}"
 
   @doc false
   def build_result_payload(status, data) do
@@ -383,5 +363,6 @@ defmodule Durable.Orchestration do
     |> Module.split()
     |> List.last()
     |> Macro.underscore()
+    |> String.to_atom()
   end
 end

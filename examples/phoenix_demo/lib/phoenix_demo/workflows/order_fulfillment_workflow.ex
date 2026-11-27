@@ -25,7 +25,7 @@ defmodule PhoenixDemo.Workflows.OrderFulfillmentWorkflow do
 
   require Logger
 
-  workflow "fulfill_order", timeout: minutes(10) do
+  workflow "fulfill_order", timeout: minutes(10), on_failure: :rollback do
     step :reserve_inventory, [compensate: :release_inventory], fn data ->
       order_id = data["order_id"] || "ORD-#{:rand.uniform(99_999)}"
       reservation_id = "RES-#{:rand.uniform(99_999)}"
@@ -90,7 +90,9 @@ defmodule PhoenixDemo.Workflows.OrderFulfillmentWorkflow do
       tracking = get_context(:tracking_number)
       payment_id = get_context(:payment_id)
 
-      Logger.info("[Order #{order_id}] Confirmation sent — payment=#{payment_id} tracking=#{tracking}")
+      Logger.info(
+        "[Order #{order_id}] Confirmation sent — payment=#{payment_id} tracking=#{tracking}"
+      )
 
       {:ok,
        %{

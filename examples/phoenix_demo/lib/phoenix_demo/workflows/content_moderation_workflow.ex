@@ -4,7 +4,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
   max-score, branch routes based on severity, and ambiguous content is sent
   to a human via `wait_for_choice`.
 
-  Showcases: `parallel into:`, `branch on:`, `wait_for_choice`.
+  Showcases: a named `parallel` with `into:`, `branch on:`, `wait_for_choice`.
 
   Input:
       %{"content_id" => "POST-123", "content_type" => "image"}
@@ -29,25 +29,26 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
       {:ok, assign(data, "content_id", content_id)}
     end
 
-    parallel into: fn _ctx, results ->
-      scores = %{
-        "toxicity" => extract_score(results, :toxicity_scan),
-        "nsfw" => extract_score(results, :nsfw_scan),
-        "spam" => extract_score(results, :spam_scan)
-      }
+    parallel :scans,
+      into: fn _ctx, results ->
+        scores = %{
+          "toxicity" => extract_score(results, "toxicity_scan"),
+          "nsfw" => extract_score(results, "nsfw_scan"),
+          "spam" => extract_score(results, "spam_scan")
+        }
 
-      max_score =
-        scores
-        |> Map.values()
-        |> Enum.max()
+        max_score =
+          scores
+          |> Map.values()
+          |> Enum.max()
 
-      Logger.info("[Mod] Scan complete: #{inspect(scores)} (max=#{max_score})")
+        Logger.info("[Mod] Scan complete: #{inspect(scores)} (max=#{max_score})")
 
-      put_context(:scores, scores)
-      put_context(:max_score, max_score)
+        put_context(:scores, scores)
+        put_context(:max_score, max_score)
 
-      {:ok, %{"scores" => scores, "max_score" => max_score}}
-    end do
+        {:ok, %{"scores" => scores, "max_score" => max_score}}
+      end do
       step :toxicity_scan, fn _data ->
         Process.sleep(:rand.uniform(300))
         score = :rand.uniform(100) / 100
@@ -68,15 +69,15 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
     end
 
     branch on: fn _data ->
-      max = get_context(:max_score) || 0
+             max = get_context(:max_score) || 0
 
-      cond do
-        max > 0.85 -> :high
-        max > 0.4 -> :medium
-        true -> :low
-      end
-    end do
-      :high ->
+             cond do
+               max > 0.85 -> "high"
+               max > 0.4 -> "medium"
+               true -> "low"
+             end
+           end do
+      "high" ->
         step :auto_remove, fn _data ->
           content_id = get_context(:content_id)
           Logger.info("[Mod] Auto-removed #{content_id} (high score)")
@@ -89,7 +90,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
            }}
         end
 
-      :medium ->
+      "medium" ->
         step :request_human_review, fn data ->
           content_id = get_context(:content_id)
 
@@ -126,7 +127,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
            }}
         end
 
-      :low ->
+      "low" ->
         step :auto_approve, fn _data ->
           content_id = get_context(:content_id)
           Logger.info("[Mod] Auto-approved #{content_id} (low score)")
@@ -143,8 +144,9 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
 
   defp extract_score(results, key) do
     case Map.get(results, key) do
-      {:ok, %{score: s}} -> s
-      %{score: s} -> s
+      # Lanes are keyed by name as strings, and a lane hands back what it
+      # stored, so its keys are strings too.
+      {:ok, %{"score" => s}} -> s
       _ -> 0
     end
   end

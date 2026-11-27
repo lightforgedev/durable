@@ -46,21 +46,33 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
 
       amount =
         case result["amount"] do
-          n when is_number(n) -> n
-          s when is_binary(s) -> case Float.parse(s) do
-            {n, _} -> n
-            :error -> 0
-          end
-          _ -> 0
+          n when is_number(n) ->
+            n
+
+          s when is_binary(s) ->
+            case Float.parse(s) do
+              {n, _} -> n
+              :error -> 0
+            end
+
+          _ ->
+            0
         end
 
       put_context(:amount, amount)
       put_context(:category, result["category"])
       put_context(:description, result["description"])
 
-      Logger.info("[Expense] Received: $#{amount} #{result["category"]} — #{result["description"]}")
+      Logger.info(
+        "[Expense] Received: $#{amount} #{result["category"]} — #{result["description"]}"
+      )
 
-      {:ok, assign(data, :expense, %{"amount" => amount, "category" => result["category"], "description" => result["description"]})}
+      {:ok,
+       assign(data, :expense, %{
+         "amount" => amount,
+         "category" => result["category"],
+         "description" => result["description"]
+       })}
     end
 
     decision :route_by_amount, fn data ->
@@ -133,11 +145,14 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
       employee = get_context(:employee)
       amount = get_context(:amount)
       category = get_context(:category)
-      approved = data[:approved] == true
+      approved = data["approved"] == true
       path = get_context(:approval_path)
 
       status = if approved, do: "recorded", else: "denied"
-      Logger.info("[Expense] $#{amount} #{category} for #{employee} — #{status} (#{path} approval)")
+
+      Logger.info(
+        "[Expense] $#{amount} #{category} for #{employee} — #{status} (#{path} approval)"
+      )
 
       {:ok,
        %{
@@ -151,10 +166,8 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
     end
   end
 
-  defp approved?(:approved), do: true
   defp approved?("approved"), do: true
   defp approved?(%{"approved" => true}), do: true
   defp approved?(%{"value" => true}), do: true
-  defp approved?(%{"value" => :approved}), do: true
   defp approved?(_), do: false
 end

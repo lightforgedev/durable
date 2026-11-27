@@ -10,7 +10,7 @@ Build reliable AI agent workflows with automatic retries, state persistence, and
 # mix.exs
 defp deps do
   [
-    {:durable, "~> 0.1.0-rc"},
+    {:durable, "~> 2.0"},
     {:req_llm, "~> 1.1"}
   ]
 end
@@ -62,26 +62,26 @@ defmodule MyApp.DocumentProcessor do
   workflow "process_document" do
     step :fetch, fn ctx ->
       doc = DocumentStore.get(ctx["doc_id"])
-      {:ok, %{doc: doc}}
+      {:ok, assign(ctx, :content, doc.content)}
     end
 
     # AI classification with automatic retry
     step :classify, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
-      content = ctx.doc.content
+      content = ctx["content"]
 
       doc_type = ReqLLM.generate_text!(
         "anthropic:claude-sonnet-4-20250514",
-        "Classify this document as :invoice, :contract, or :other. Reply with only the atom.\n\n#{content}"
-      ) |> String.trim() |> String.to_atom()
+        "Classify this document as invoice, contract, or other. Reply with only that word.\n\n#{content}"
+      ) |> String.trim()
 
       {:ok, assign(ctx, :doc_type, doc_type)}
     end
 
-    # Conditional branching - only ONE path executes
-    branch on: fn ctx -> ctx.doc_type end do
-      :invoice ->
+    # Conditional branching - only ONE path executes.
+    branch on: fn ctx -> ctx["doc_type"] end do
+      "invoice" ->
         step :extract_invoice, [retry: [max_attempts: 3]], fn ctx ->
-          content = ctx.doc.content
+          content = ctx["content"]
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -98,14 +98,15 @@ defmodule MyApp.DocumentProcessor do
         end
 
         step :validate_invoice, fn ctx ->
-          extracted = ctx.extracted
-          calculated = Enum.sum(Enum.map(extracted.line_items, & &1.amount))
-          {:ok, assign(ctx, :valid, abs(calculated - extracted.total) < 0.01)}
+          # Keys are strings at every depth
+          extracted = ctx["extracted"]
+          calculated = Enum.sum(Enum.map(extracted["line_items"], & &1["amount"]))
+          {:ok, assign(ctx, :valid, abs(calculated - extracted["total"]) < 0.01)}
         end
 
-      :contract ->
+      "contract" ->
         step :extract_contract, [retry: [max_attempts: 3]], fn ctx ->
-          content = ctx.doc.content
+          content = ctx["content"]
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -128,12 +129,10 @@ defmodule MyApp.DocumentProcessor do
 
     # Runs after any branch completes
     step :store, fn ctx ->
-      doc = ctx.doc
-
-      DocumentStore.update(doc.id, %{
-        doc_type: ctx.doc_type,
-        extracted_data: Map.get(ctx, :extracted, %{}),
-        needs_review: Map.get(ctx, :needs_review, false)
+      DocumentStore.update(ctx["doc_id"], %{
+        doc_type: ctx["doc_type"],
+        extracted_data: get(ctx, :extracted, %{}),
+        needs_review: get(ctx, :needs_review, false)
       })
 
       {:ok, ctx}
@@ -151,7 +150,7 @@ end
 
 ```elixir
 step :ai_call, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
-  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", ctx.prompt)
+  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", ctx["prompt"])
   {:ok, assign(ctx, :result, result)}
 end
 ```
@@ -160,7 +159,7 @@ end
 
 ```elixir
 step :extract, fn ctx ->
-  case ReqLLM.generate_object(model, ctx.prompt, schema: schema) do
+  case ReqLLM.generate_object(model, ctx["prompt"], schema: schema) do
     {:ok, extracted} -> {:ok, assign(ctx, :data, extracted)}
     {:error, _} -> raise "Invalid response"  # Triggers retry
   end
@@ -173,7 +172,7 @@ end
 use Durable.Wait
 
 step :review, fn ctx ->
-  if ctx.confidence < 0.8 do
+  if ctx["confidence"] < 0.8 do
     result = wait_for_input("human_review", timeout: hours(24))
     {:ok, assign(ctx, :human_verified, result)}
   else
@@ -185,10 +184,10 @@ end
 ### Branch on AI Classification
 
 ```elixir
-branch on: fn ctx -> ctx.category end do
-  :billing ->
+branch on: fn ctx -> ctx["category"] end do
+  "billing" ->
     step :handle_billing, fn ctx -> {:ok, ctx} end
-  :technical ->
+  "technical" ->
     step :handle_technical, fn ctx -> {:ok, ctx} end
   _ ->
     step :handle_default, fn ctx -> {:ok, ctx} end
@@ -201,7 +200,7 @@ end
 # Get execution status
 {:ok, execution} = Durable.get_execution(workflow_id)
 execution.status   # :running, :completed, :failed, :waiting
-execution.context  # All accumulated data
+execution.context  # The workflow's data, with string keys
 
 # With step details
 {:ok, execution} = Durable.get_execution(workflow_id, include_steps: true)

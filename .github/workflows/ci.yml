@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, so one stacked on another is checked before it reaches main.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -24,7 +24,7 @@ jobs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -63,7 +63,7 @@ jobs:
         working-directory: durable
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
@@ -98,7 +98,88 @@ jobs:
         run: mix credo --strict
 
       - name: Run tests
-        run: mix test
+        run: mix test --warnings-as-errors
+
+  # Live pollers, committed rows, the real clock and second BEAM nodes: what the
+  # SQL Sandbox in the job above can't exercise. Fuzz generates its inputs from
+  # the seed printed in the log: `mix test --only fuzz --seed N` replays a failure.
+  # Each runs direct and through PgBouncer in transaction mode, which is how many
+  # apps reach Postgres in production.
+  integration:
+    name: Durable ${{ matrix.suite }} (${{ matrix.db_port == 6432 && 'PgBouncer' || 'direct' }})
+    needs: changes
+    if: needs.changes.outputs.durable == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [integration, fuzz]
+        db_port: [54321, 6432]
+
+    env:
+      INTEGRATION_DB_PORT: ${{ matrix.db_port }}
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54321:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      pgbouncer:
+        image: edoburu/pgbouncer:v1.26.1-p0
+        env:
+          DB_HOST: postgres
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          AUTH_TYPE: plain
+          POOL_MODE: transaction
+          LISTEN_PORT: 6432
+        ports:
+          - 6432:6432
+
+    defaults:
+      run:
+        working-directory: durable
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v6
+        with:
+          path: durable/deps
+          key: ${{ runner.os }}-durable-mix-${{ hashFiles('durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-durable-mix-
+
+      - name: Restore build cache
+        uses: actions/cache@v6
+        with:
+          path: durable/_build
+          key: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run ${{ matrix.suite }} tests
+        run: mix test --only ${{ matrix.suite }} --warnings-as-errors
 
   dashboard:
     name: Dashboard
@@ -106,12 +187,32 @@ jobs:
     if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
 
+    # Page tests (DurableDashboard.LiveCase) mount the LiveViews against a
+    # real Durable instance.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54321:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    # Test against the durable in this checkout, not the one on Hex.
+    env:
+      DURABLE_PATH: ../durable
+
     defaults:
       run:
         working-directory: durable_dashboard
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
@@ -122,12 +223,12 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 12
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: pnpm
           cache-dependency-path: durable_dashboard/assets/pnpm-lock.yaml
 
@@ -155,6 +256,23 @@ jobs:
       - name: Check formatting
         run: mix format --check-formatted
 
+      - name: Check JS formatting
+        working-directory: durable_dashboard/assets
+        run: pnpm format:check
+
+      - name: Lint JS
+        working-directory: durable_dashboard/assets
+        run: pnpm lint
+
+      - name: Typecheck
+        working-directory: durable_dashboard/assets
+        run: pnpm typecheck
+
+      # Fails on error-severity findings; warnings are reported only.
+      - name: React Doctor
+        working-directory: durable_dashboard/assets
+        run: pnpm run react-doctor
+
       - name: Build assets
         working-directory: durable_dashboard/assets
         run: pnpm build
@@ -162,12 +280,15 @@ jobs:
       - name: Compile
         run: mix compile --warnings-as-errors
 
+      - name: Credo
+        run: mix credo --strict
+
       - name: Run tests
         run: mix test
 
   ci-status:
     name: CI status
-    needs: [changes, durable, dashboard]
+    needs: [changes, durable, integration, dashboard]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -176,4 +297,5 @@ jobs:
           set -e
           [[ "${{ needs.changes.result }}" == "success" ]] || exit 1
           [[ "${{ needs.durable.result }}" =~ ^(success|skipped)$ ]] || exit 1
+          [[ "${{ needs.integration.result }}" =~ ^(success|skipped)$ ]] || exit 1
           [[ "${{ needs.dashboard.result }}" =~ ^(success|skipped)$ ]] || exit 1

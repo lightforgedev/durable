@@ -13,26 +13,34 @@ defmodule Durable.Context do
         use Durable.Context
 
         workflow "process_order" do
-          step :init do
-            order = input().order
-            put_context(:order_id, order.id)
-            put_context(:items, order.items)
+          step :init, fn order ->
+            put_context(:order_id, order["id"])
+            {:ok, order}
           end
 
-          step :calculate_total do
-            items = get_context(:items)
-            total = Enum.sum(Enum.map(items, & &1.price))
+          step :calculate_total, fn order ->
+            total = order["items"] |> Enum.map(& &1["price"]) |> Enum.sum()
             put_context(:total, total)
+            {:ok, order}
           end
 
-          step :finalize do
-            %{
-              order_id: get_context(:order_id),
-              total: get_context(:total)
-            }
+          step :finalize, fn order ->
+            Orders.close(get_context(:order_id), get_context(:total))
+            {:ok, order}
           end
         end
       end
+
+  A step still returns `{:ok, data}`. What it put in the context is kept
+  beside what it returns.
+
+  ## Keys
+
+  The context's keys are strings, as they are stored. A key may be named with
+  an atom or a string: `put_context(:total, 10)` and `put_context("total", 10)`
+  write the same key, `get_context(:total)` and `get_context("total")` read it,
+  and `context()["total"]` is where it is. The same holds for `input/0`, and
+  for the data a step is handed.
 
   ## Context Storage
 
@@ -43,10 +51,20 @@ defmodule Durable.Context do
 
   """
 
+  import Ecto.Query, only: [from: 2]
+
+  alias Durable.Config
+  alias Durable.EngineState
+  alias Durable.Queue.Drainer
+  alias Durable.Repo
+  alias Durable.Storage.Schemas.WorkflowExecution
+
   @context_key :durable_context
   @input_key :durable_input
   @workflow_id_key :durable_workflow_id
   @step_key :durable_current_step
+  @attempt_key :durable_attempt
+  @instance_key :durable_instance
 
   @doc """
   Injects context management functions into the calling module.
@@ -67,11 +85,14 @@ defmodule Durable.Context do
           input: 0,
           workflow_id: 0,
           current_step: 0,
+          attempt: 0,
+          max_attempts: 0,
+          last_attempt?: 0,
+          shutting_down?: 0,
+          cancelled?: 0,
           append_context: 2,
           increment_context: 2,
-          parallel_results: 0,
-          parallel_result: 1,
-          parallel_ok?: 1
+          bind: 1
         ]
     end
   end
@@ -82,7 +103,7 @@ defmodule Durable.Context do
   ## Examples
 
       ctx = context()
-      # => %{order_id: 123, items: [...]}
+      # => %{"order_id" => 123, "items" => [...]}
 
   """
   @spec context() :: map()
@@ -116,8 +137,8 @@ defmodule Durable.Context do
   """
   @spec get_context(atom() | String.t(), any()) :: any()
   def get_context(key, default) do
-    context()
-    |> Map.get(normalize_key(key), default)
+    context = context()
+    Map.get(context, stored_key(context, key), default)
   end
 
   @doc """
@@ -131,8 +152,13 @@ defmodule Durable.Context do
   """
   @spec put_context(atom() | String.t(), any()) :: :ok
   def put_context(key, value) do
-    new_context = Map.put(context(), normalize_key(key), value)
-    Process.put(@context_key, new_context)
+    # The engine's own keys aren't the user's to write: dropped, like any
+    # other of the user's data that uses one.
+    if not EngineState.key?(key) do
+      context = context()
+      Process.put(@context_key, Map.put(context, stored_key(context, key), value))
+    end
+
     :ok
   end
 
@@ -146,8 +172,8 @@ defmodule Durable.Context do
   """
   @spec put_context(map()) :: :ok
   def put_context(map) when is_map(map) do
-    new_context = Map.merge(context(), map)
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, Map.merge(context, as_stored(context, EngineState.strip(map))))
     :ok
   end
 
@@ -177,8 +203,8 @@ defmodule Durable.Context do
   """
   @spec merge_context(map()) :: :ok
   def merge_context(map) when is_map(map) do
-    new_context = deep_merge(context(), map)
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, deep_merge(context, as_stored(context, EngineState.strip(map))))
     :ok
   end
 
@@ -193,8 +219,8 @@ defmodule Durable.Context do
   """
   @spec delete_context(atom() | String.t()) :: :ok
   def delete_context(key) do
-    new_context = Map.delete(context(), normalize_key(key))
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, Map.delete(context, stored_key(context, key)))
     :ok
   end
 
@@ -210,15 +236,17 @@ defmodule Durable.Context do
   """
   @spec has_context?(atom() | String.t()) :: boolean()
   def has_context?(key) do
-    Map.has_key?(context(), normalize_key(key))
+    context = context()
+    Map.has_key?(context, stored_key(context, key))
   end
 
   @doc """
-  Returns the initial workflow input.
+  Returns the input the run was started with, as it is stored: its keys are
+  strings, whatever they were when it was passed to `Durable.start/3`.
 
   ## Examples
 
-      order = input().order
+      order_id = input()["order_id"]
 
   """
   @spec input() :: map()
@@ -250,6 +278,107 @@ defmodule Durable.Context do
   @spec current_step() :: atom() | nil
   def current_step do
     Process.get(@step_key)
+  end
+
+  @doc """
+  Returns which attempt of the current step this is, starting at 1.
+
+  The count carries over when a run resumes after a crash, and starts again at
+  1 after `Durable.retry/2`.
+
+  ## Examples
+
+      step :charge, [retry: [max_attempts: 5]], fn ctx ->
+        Logger.info("charging, attempt \#{attempt()} of \#{max_attempts()}")
+        ...
+      end
+
+  """
+  @spec attempt() :: pos_integer()
+  def attempt do
+    {attempt, _max} = Process.get(@attempt_key, {1, 1})
+    attempt
+  end
+
+  @doc """
+  Returns how many attempts the current step gets: its `retry: [max_attempts: n]`,
+  or 1 if it has no `retry:`.
+  """
+  @spec max_attempts() :: pos_integer()
+  def max_attempts do
+    {_attempt, max} = Process.get(@attempt_key, {1, 1})
+    max
+  end
+
+  @doc """
+  Returns `true` on the current step's last attempt: if it returns an error,
+  the step won't be tried again.
+
+  ## Examples
+
+      step :charge, [retry: [max_attempts: 5]], fn ctx ->
+        case Payments.charge(ctx["order"]) do
+          {:ok, _} = ok -> ok
+          {:error, reason} ->
+            if last_attempt?(), do: Orders.mark_payment_failed(ctx["order"])
+            {:error, reason}
+        end
+      end
+
+  """
+  @spec last_attempt?() :: boolean()
+  def last_attempt? do
+    attempt() >= max_attempts()
+  end
+
+  @doc """
+  Returns `true` once this node has started shutting down.
+
+  The node finishes the step it's on, then hands the rest of the run to another
+  node. A step that runs longer than the `:shutdown_grace_period` can check this
+  and stop early. Snoozing doesn't use an attempt, and another node carries on
+  straight away:
+
+  ## Examples
+
+      step :crawl, fn ctx ->
+        for page <- pages_left(ctx), not shutting_down?(), do: crawl(page)
+
+        if shutting_down?(),
+          do: {:snooze, 0, "node stopping"},
+          else: {:ok, ctx}
+      end
+
+  """
+  @spec shutting_down?() :: boolean()
+  def shutting_down? do
+    Drainer.stopping?(Process.get(@instance_key, Durable))
+  end
+
+  @doc """
+  Returns `true` once the run has been cancelled.
+
+  A cancelled run's step is stopped at the worker's next heartbeat, killed like
+  any process. A step that would rather stop cleanly, between two chunks of
+  work, can check this first. It reads the database, so check it between chunks
+  and not in a tight loop:
+
+  ## Examples
+
+      step :export, fn ctx ->
+        for chunk <- chunks_left(ctx), not cancelled?(), do: export(chunk)
+        {:ok, ctx}
+      end
+
+  """
+  @spec cancelled?() :: boolean()
+  def cancelled? do
+    id = workflow_id()
+    config = Config.get(Process.get(@instance_key, Durable))
+
+    id != nil and
+      Repo.one(config, from(w in WorkflowExecution, where: w.id == ^id, select: w.status)) ==
+        :cancelled
   end
 
   @doc """
@@ -285,70 +414,84 @@ defmodule Durable.Context do
     put_context(key, current + amount)
   end
 
-  @doc """
-  Returns the full parallel results map from context.
+  # Internal functions for executor use
 
-  The results map contains tagged tuples: `%{step_name => {:ok, data} | {:error, reason}}`
-
-  ## Examples
-
-      parallel do
-        step :payment, fn ctx -> {:ok, %{id: 123}} end
-        step :delivery, fn ctx -> {:error, :not_found} end
-      end
-
-      step :handle, fn ctx ->
-        results = parallel_results()
-        # => %{payment: {:ok, %{id: 123}}, delivery: {:error, :not_found}}
-      end
-
-  """
-  @spec parallel_results() :: map()
-  def parallel_results do
-    get_context(:__results__, %{})
+  @doc false
+  # A stored name of the code's own (a step, a lane, a compensation) as the atom
+  # the code wrote. Never for the user's data, whose keys stay strings; and only
+  # an atom that exists, since one atom per distinct name is never freed.
+  @spec known_key(String.t()) :: atom() | String.t()
+  def known_key(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> key
   end
 
-  @doc """
-  Returns a specific parallel step's result by name.
-
-  ## Examples
-
-      step :handle, fn ctx ->
-        case parallel_result(:payment) do
-          {:ok, payment} -> # handle success
-          {:error, reason} -> # handle error
-        end
-      end
-
-  """
-  @spec parallel_result(atom()) :: {:ok, any()} | {:error, any()} | nil
-  def parallel_result(step_name) when is_atom(step_name) do
-    parallel_results() |> Map.get(step_name)
-  end
+  # Everything of a step's that another process needs, leaving out the process's
+  # own log buffer and IO capture.
+  @unbound_keys [
+    :durable_logs,
+    :durable_log_step_body,
+    :durable_io_capture_pid,
+    :durable_original_group_leader
+  ]
 
   @doc """
-  Checks if a parallel step succeeded.
+  Wraps a function so it runs as part of the current step in another process.
 
-  ## Examples
+  A `Task` starts with none of the step's state. Wrapped, its function can read
+  the context and has the step's Logger metadata and OpenTelemetry span, and
+  its log lines are saved on the step's row. Lines from a plain `Task` still
+  reach the console, but aren't saved.
 
-      step :handle, fn ctx ->
-        if parallel_ok?(:payment) do
-          # payment succeeded
-        else
-          # payment failed
-        end
-      end
+      Task.await(Task.async(bind(fn -> fetch(order_id) end)))
+      Task.async_stream(orders, bind(&fetch/1))
 
+  Changes it makes to the context stay in its own process. Lines it logs after
+  the step has ended aren't saved.
   """
-  @spec parallel_ok?(atom()) :: boolean()
-  def parallel_ok?(step_name) when is_atom(step_name) do
-    case parallel_result(step_name) do
-      {:ok, _} -> true
-      _ -> false
+  @spec bind((-> result)) :: (-> result) when result: term()
+  @spec bind((arg -> result)) :: (arg -> result) when arg: term(), result: term()
+  def bind(fun) when is_function(fun, 0) do
+    state = step_state()
+
+    fn ->
+      restore_step_state(state)
+      fun.()
     end
   end
 
-  # Internal functions for executor use
+  def bind(fun) when is_function(fun, 1) do
+    state = step_state()
+
+    fn arg ->
+      restore_step_state(state)
+      fun.(arg)
+    end
+  end
+
+  @compile {:no_warn_undefined, :otel_ctx}
+
+  defp step_state do
+    %{
+      dict: for({key, _} = entry <- Process.get(), step_key?(key), do: entry),
+      logger: :logger.get_process_metadata(),
+      otel: if(Code.ensure_loaded?(:otel_ctx), do: :otel_ctx.get_current())
+    }
+  end
+
+  defp step_key?({Durable.Telemetry, _}), do: true
+
+  defp step_key?(key) when is_atom(key),
+    do: key not in @unbound_keys and String.starts_with?(Atom.to_string(key), "durable_")
+
+  defp step_key?(_key), do: false
+
+  defp restore_step_state(%{dict: dict, logger: logger, otel: otel}) do
+    Enum.each(dict, fn {key, value} -> Process.put(key, value) end)
+    if is_map(logger), do: :logger.set_process_metadata(logger)
+    if otel, do: :otel_ctx.attach(otel)
+  end
 
   @doc false
   def init_context(input, workflow_id) do
@@ -360,21 +503,10 @@ defmodule Durable.Context do
 
   @doc false
   def restore_context(context_map, input, workflow_id) do
-    # Convert string keys to atoms since JSON encoding converts atoms to strings
-    atomized_context = atomize_keys(context_map || %{})
-    Process.put(@context_key, atomized_context)
+    Process.put(@context_key, context_map || %{})
     Process.put(@input_key, input)
     Process.put(@workflow_id_key, workflow_id)
     :ok
-  end
-
-  # Convert string keys to atoms (for context restored from database)
-  # Only converts top-level keys, nested maps keep their original keys
-  defp atomize_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {key, value} when is_binary(key) -> {String.to_atom(key), value}
-      {key, value} -> {key, value}
-    end)
   end
 
   @doc false
@@ -384,8 +516,26 @@ defmodule Durable.Context do
   end
 
   @doc false
+  def set_attempt(attempt, max_attempts) do
+    Process.put(@attempt_key, {attempt, max_attempts})
+    :ok
+  end
+
+  @doc false
+  def set_instance(name) do
+    Process.put(@instance_key, name)
+    :ok
+  end
+
+  @doc false
   def set_workflow_id(workflow_id) do
     Process.put(@workflow_id_key, workflow_id)
+    :ok
+  end
+
+  @doc false
+  def set_input(input) do
+    Process.put(@input_key, input || %{})
     :ok
   end
 
@@ -400,19 +550,23 @@ defmodule Durable.Context do
     Process.delete(@input_key)
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
+    Process.delete(@attempt_key)
+    EngineState.clear_current()
     # Log capture keys (cleanup in case of crashes)
-    Process.delete(:durable_logs)
+    Durable.LogCapture.clear_logs()
     Process.delete(:durable_original_group_leader)
     Process.delete(:durable_io_capture_pid)
+    Durable.Telemetry.clear_log_metadata()
     :ok
   end
 
   # Helper functions
 
-  # Normalize keys to atoms for consistency
-  # (JSON encoding converts atoms to strings, so we normalize back)
-  defp normalize_key(key) when is_atom(key), do: key
-  defp normalize_key(key) when is_binary(key), do: String.to_atom(key)
+  # The context's keys are strings, as they are stored. A key may be named
+  # with an atom.
+  defp stored_key(_context, key), do: to_string(key)
+
+  defp as_stored(context, map), do: Map.new(map, fn {k, v} -> {stored_key(context, k), v} end)
 
   defp deep_merge(left, right) do
     Map.merge(left, right, fn

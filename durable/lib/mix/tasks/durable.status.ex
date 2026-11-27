@@ -33,7 +33,7 @@ defmodule Mix.Tasks.Durable.Status do
 
   @impl Mix.Task
   def run(args) do
-    Helpers.ensure_started()
+    Helpers.ensure_started_readonly()
     {opts, _, _} = OptionParser.parse(args, strict: [name: :string])
     durable_name = Helpers.get_durable_name(opts)
 
@@ -90,7 +90,7 @@ defmodule Mix.Tasks.Durable.Status do
     rows =
       @statuses
       |> Enum.map(fn status ->
-        count = Query.count_executions(status: status, durable: durable_name)
+        count = Query.count_executions!(status: status, durable: durable_name)
         {status, count}
       end)
       |> Enum.filter(fn {_, count} -> count > 0 end)

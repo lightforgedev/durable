@@ -1,10 +1,10 @@
 /**
  * Graph layout for the workflow detail FlowGraph.
  *
- * Single dagre LR run over every emitted node (DESIGN.md §11). Parallel
- * fork/join markers are first-class nodes — no bounding-rectangle group
- * container, no inner sub-layout. Branches splay between the markers
- * naturally because dagre orders them by rank.
+ * Single dagre LR run over every emitted node (DESIGN.md §11). A parallel
+ * block's join and a branch's gateway are small first-class nodes — no
+ * bounding-rectangle group container, no inner sub-layout — so children and
+ * clauses splay between them in their own lanes.
  *
  * Adds explicit Start / End marker nodes that anchor the boundaries so
  * the flow direction reads at a glance even when panned.
@@ -22,8 +22,12 @@ import type { GraphData, GraphEdge } from "./types";
 // behind it (the drill-in signature), which only peeks a few px beyond the
 // box and so doesn't change the dagre footprint. See DESIGN.md §11.
 // ---------------------------------------------------------------------------
-const CELL_WIDTH = 200;
+const CELL_WIDTH = 220;
 const CELL_HEIGHT = 56;
+
+// Join and branch render as pills too — they run no code of their own.
+const BLOCK_WIDTH = 132;
+const BLOCK_HEIGHT = 28;
 
 // Start/End render as small terminal pills, not full cards.
 const TERMINAL_WIDTH = 52;
@@ -38,8 +42,8 @@ const TERMINAL_HEIGHT = 28;
 // separation rather than misalignment.
 // Cards are wider + uniform-height now, so they need less vertical splay;
 // near-equal rank/node gaps read grid-like (Argo's ranksep≈nodesep insight).
-const NODESEP = 70;
-const RANKSEP = 110;
+const NODESEP = 44;
+const RANKSEP = 88;
 const MARGIN = 40;
 
 const START_NODE_ID = "__durable_start__";
@@ -60,6 +64,9 @@ interface Dim {
 function dimsFor(type: string): Dim {
   if (type === "start" || type === "end") {
     return { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT };
+  }
+  if (type === "join" || type === "branch") {
+    return { width: BLOCK_WIDTH, height: BLOCK_HEIGHT };
   }
   // child_workflow shares the step cell footprint (see sizing note above).
   return { width: CELL_WIDTH, height: CELL_HEIGHT };
@@ -106,7 +113,7 @@ export function layoutGraph(
   const canReuse = prevPositions !== undefined && allNodes.every((n) => prevPositions.has(n.id));
   const positions = canReuse ? (prevPositions as PositionMap) : layoutDagre(allNodes, allEdges);
 
-  const nodes: Node[] = allNodes.map((n) => {
+  const steps: Node[] = allNodes.map((n) => {
     const pos = positions.get(n.id) || { x: 0, y: 0 };
     return {
       id: n.id,
@@ -115,6 +122,9 @@ export function layoutGraph(
       data: (n.data ?? {}) as Record<string, unknown>,
     };
   });
+
+  // Frames go first, so they're drawn behind the steps they hold.
+  const nodes: Node[] = [...laneFrames(graph, positions), ...steps];
 
   const edges: Edge[] = allEdges.map((e) => ({
     id: e.id,
@@ -132,6 +142,77 @@ export function layoutGraph(
   }));
 
   return { nodes, edges, positions };
+}
+
+// Room a lane's frame leaves around its steps: less than half the row gap
+// above and below, so frames of neighbouring lanes never touch.
+const LANE_PAD_X = 14;
+const LANE_PAD_Y = 12;
+
+/**
+ * A frame for each lane of several steps in a named parallel block, sized to
+ * the steps the block's join lists for it (`graph_builder.ex`).
+ */
+function laneFrames(graph: GraphData, positions: PositionMap): Node[] {
+  const types = new Map(graph.nodes.map((n) => [n.id, n.type]));
+  const frames: Node[] = [];
+
+  for (const join of graph.nodes) {
+    for (const lane of join.data.lanes ?? []) {
+      const members = (lane.nodes ?? []).filter((id) => positions.has(id));
+      if (members.length < 2) continue;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const id of members) {
+        const pos = positions.get(id) as { x: number; y: number };
+        const { width, height } = dimsFor(types.get(id) ?? "step");
+        minX = Math.min(minX, pos.x);
+        minY = Math.min(minY, pos.y);
+        maxX = Math.max(maxX, pos.x + width);
+        maxY = Math.max(maxY, pos.y + height);
+      }
+
+      const width = maxX - minX + 2 * LANE_PAD_X;
+      const height = maxY - minY + 2 * LANE_PAD_Y;
+      frames.push({
+        id: `${join.id}:lane:${lane.name}`,
+        type: "lane",
+        position: { x: minX - LANE_PAD_X, y: minY - LANE_PAD_Y },
+        data: { ...lane, width, height },
+        width,
+        height,
+        zIndex: -1,
+        draggable: false,
+        selectable: false,
+        focusable: false,
+      });
+    }
+  }
+
+  return frames;
+}
+
+/** The laid-out graph's extent, in flow coordinates. */
+export function graphBounds(nodes: Node[]): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const n of nodes) {
+    // A lane frame is sized to its lane; every other node by its type.
+    const { width, height } =
+      n.width && n.height ? { width: n.width, height: n.height } : dimsFor(n.type ?? "step");
+    minX = Math.min(minX, n.position.x);
+    minY = Math.min(minY, n.position.y);
+    maxX = Math.max(maxX, n.position.x + width);
+    maxY = Math.max(maxY, n.position.y + height);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
 // ---------------------------------------------------------------------------

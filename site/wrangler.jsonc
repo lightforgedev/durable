@@ -1,0 +1,18 @@
+// durable.wavezync.com: the built Astro site (dist/), served as Workers static assets.
+// The site is fully static, so there is no Worker script (`main`) and no ASSETS binding.
+// `pnpm run deploy` builds the site and deploys it; CI deploys main (.github/workflows/site.yml).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "durable",
+  "account_id": "f69696ea6aec9975d75a770144674386",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    // Astro writes docs/index.html; /docs redirects to /docs/ (trailingSlash: 'always').
+    "html_handling": "auto-trailing-slash",
+    // Unknown paths get Astro's 404.html with a 404 status.
+    "not_found_handling": "404-page"
+  },
+  "routes": [{ "pattern": "durable.wavezync.com", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

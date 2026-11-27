@@ -1,7 +1,6 @@
 defmodule Durable.Executor.ErrorSanitizationTest do
   @moduledoc """
-  Regression coverage for Bug #3 — secondary JSON encoding errors hiding the
-  root cause (see `docs/bug-reports/2026-04-12-parallel-context-and-serialization.md`).
+  Regression coverage for secondary JSON encoding errors hiding the root cause.
 
   When a step crashed with an error payload that contained tuples, PIDs,
   functions, or refs, `Repo.update` would fail to encode it as JSONB and
@@ -39,7 +38,7 @@ defmodule Durable.Executor.ErrorSanitizationTest do
 
     test "walks maps recursively" do
       input = %{status: {:ok, "done"}, count: 5}
-      assert Executor.sanitize_for_json(input) == %{status: [:ok, "done"], count: 5}
+      assert Executor.sanitize_for_json(input) == %{"status" => [:ok, "done"], "count" => 5}
     end
 
     test "walks lists recursively" do
