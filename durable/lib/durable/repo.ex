@@ -1,0 +1,207 @@
+defmodule Durable.Repo do
+  @moduledoc """
+  Wrapper for Ecto repo calls with centralized options.
+
+  This module provides wrapper functions for common Ecto operations that
+  automatically apply default options from the Durable configuration,
+  such as the `log` option for controlling query logging.
+
+  ## Usage
+
+  Instead of calling the repo directly:
+
+      repo = config.repo
+      repo.all(query)
+
+  Use the wrapper with the config:
+
+      alias Durable.Repo
+      Repo.all(config, query)
+
+  This ensures consistent behavior across all Durable database operations.
+  """
+
+  alias Durable.Config
+  alias Ecto.Adapters.SQL
+
+  @doc false
+  # Whether this could be a run's id. Anything else can't match a row, and would
+  # raise from the query instead of saying so.
+  @spec id?(term()) :: boolean()
+  def id?(value),
+    do: is_binary(value) and byte_size(value) == 36 and Ecto.UUID.cast(value) != :error
+
+  @doc false
+  # Whether this says nothing about what was written, so a try later may go
+  # through: the connection went, or the database gave up on the statement
+  # (a statement or lock timeout, a deadlock, a serialization failure) rather
+  # than refusing it. A dropped connection is DBConnection's error directly,
+  # and through PgBouncer a FATAL from the pooler, such as "server conn
+  # crashed?".
+  @spec transient?(term()) :: boolean()
+  def transient?(%DBConnection.ConnectionError{}), do: true
+
+  def transient?(%Postgrex.Error{postgres: %{severity: severity}})
+      when severity in ["FATAL", "PANIC"],
+      do: true
+
+  def transient?(%Postgrex.Error{postgres: %{pg_code: "08" <> _}}), do: true
+
+  def transient?(%Postgrex.Error{postgres: %{pg_code: code}})
+      when code in ["57014", "40P01", "55P03", "40001"],
+      do: true
+
+  def transient?(_error), do: false
+
+  @doc false
+  # A name Postgres can't hold as text, so it can't match a row or be stored.
+  @spec bad_text?(term()) :: boolean()
+  def bad_text?(value) when is_atom(value), do: bad_text?(Atom.to_string(value))
+
+  def bad_text?(value) when is_binary(value),
+    do: not String.valid?(value) or String.contains?(value, <<0>>)
+
+  # A list can reach the database as text too, through to_string/1 or a filter.
+  def bad_text?(value) when is_list(value) do
+    not List.improper?(value) and Enum.any?(value, &(&1 == 0 or bad_text?(&1)))
+  end
+
+  def bad_text?(_value), do: false
+
+  @doc """
+  Returns the default options to apply to all Ecto operations.
+  """
+  @spec default_options(Config.t()) :: keyword()
+  def default_options(%Config{} = config) do
+    [log: config.log_level]
+  end
+
+  # ============================================================================
+  # Query Operations
+  # ============================================================================
+
+  @doc """
+  Fetches all entries from the data store matching the given query.
+  """
+  def all(%Config{} = config, queryable, opts \\ []) do
+    config.repo.all(queryable, merge_opts(config, opts))
+  end
+
+  @doc """
+  Fetches a single result from the query.
+  """
+  def one(%Config{} = config, queryable, opts \\ []) do
+    config.repo.one(queryable, merge_opts(config, opts))
+  end
+
+  @doc """
+  Fetches a single struct from the data store where the primary key matches the given id.
+  """
+  def get(%Config{} = config, schema, id, opts \\ []) do
+    config.repo.get(schema, id, merge_opts(config, opts))
+  end
+
+  @doc """
+  Fetches a single result from the query matching the given clauses.
+  """
+  def get_by(%Config{} = config, schema, clauses, opts \\ []) do
+    config.repo.get_by(schema, clauses, merge_opts(config, opts))
+  end
+
+  @doc """
+  Calculates the given aggregate over the given field.
+  """
+  def aggregate(%Config{} = config, queryable, aggregate, opts \\ []) do
+    config.repo.aggregate(queryable, aggregate, merge_opts(config, opts))
+  end
+
+  # ============================================================================
+  # Write Operations
+  # Note: These have struct/changeset as first arg to support piping:
+  #   changeset |> Repo.insert(config)
+  #   changeset |> Repo.update(config)
+  # ============================================================================
+
+  @doc """
+  Inserts a struct defined via `Ecto.Schema` or a changeset.
+
+  Accepts struct/changeset as first arg to support piping.
+  """
+  def insert(struct_or_changeset, %Config{} = config, opts \\ []) do
+    config.repo.insert(struct_or_changeset, merge_opts(config, opts))
+  end
+
+  @doc """
+  Updates a changeset using its primary key.
+
+  Accepts changeset as first arg to support piping.
+  """
+  def update(changeset, %Config{} = config, opts \\ []) do
+    config.repo.update(changeset, merge_opts(config, opts))
+  end
+
+  @doc """
+  Deletes a struct using its primary key.
+
+  Accepts struct as first arg to support piping.
+  """
+  def delete(struct_or_changeset, %Config{} = config, opts \\ []) do
+    config.repo.delete(struct_or_changeset, merge_opts(config, opts))
+  end
+
+  @doc """
+  Inserts all entries into the repository.
+  """
+  def insert_all(%Config{} = config, schema_or_source, entries, opts \\ []) do
+    config.repo.insert_all(schema_or_source, entries, merge_opts(config, opts))
+  end
+
+  @doc """
+  Updates all entries matching the given query with the given values.
+  """
+  def update_all(%Config{} = config, queryable, updates, opts \\ []) do
+    config.repo.update_all(queryable, updates, merge_opts(config, opts))
+  end
+
+  @doc """
+  Deletes all entries matching the given query.
+  """
+  def delete_all(%Config{} = config, queryable, opts \\ []) do
+    config.repo.delete_all(queryable, merge_opts(config, opts))
+  end
+
+  # ============================================================================
+  # Transactions
+  # ============================================================================
+
+  @doc """
+  Runs an `Ecto.Multi` (or a function) inside a database transaction on the
+  configured repo. Used to atomically couple state transitions (e.g. marking
+  a PendingInput `:timeout` and resuming the workflow it belongs to) so a
+  crash between the two updates can't orphan the workflow.
+  """
+  def transaction(%Config{} = config, fun_or_multi, opts \\ []) do
+    config.repo.transaction(fun_or_multi, merge_opts(config, opts))
+  end
+
+  # ============================================================================
+  # Raw SQL
+  # ============================================================================
+
+  @doc """
+  Runs a custom SQL query on the given repo.
+  """
+  def query(%Config{} = config, sql, params \\ [], opts \\ []) do
+    SQL.query(config.repo, sql, params, merge_opts(config, opts))
+  end
+
+  # ============================================================================
+  # Private Functions
+  # ============================================================================
+
+  defp merge_opts(config, opts) do
+    config
+    |> default_options()
+    |> Keyword.merge(opts)
+  end
+end

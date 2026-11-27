@@ -1,0 +1,625 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+@source "../../lib";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================================
+ * Durable design system — "control room"
+ * ---------------------------------------------------------------------------
+ * Ink grounds, hairline structure, one live accent. Status reads as shape +
+ * color + label (DESIGN.md §4): completed teal, failed red-orange, running the
+ * live blue, waiting amber, rolled back violet. Teal/red-orange replaced
+ * green/red because the old pair failed color-blind separation checks.
+ * Every text color below clears WCAG AA on its own 13% tint.
+ * ========================================================================= */
+
+:root {
+  color-scheme: light;
+
+  /* Typography */
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Light theme */
+  --background: #f5f6f8;
+  --foreground: #0f1217;
+
+  --card: #ffffff;
+  --card-foreground: #0f1217;
+
+  --popover: #ffffff;
+  --popover-foreground: #0f1217;
+
+  /* The live accent: running, links, focus, "you are here". */
+  --primary: #1a5fd0;
+  --primary-foreground: #ffffff;
+
+  --secondary: #eef0f3;
+  --secondary-foreground: #0f1217;
+
+  --muted: #eef0f3;
+  --muted-foreground: #646c78;
+  --subtle-foreground: #4a5260;
+
+  --accent: #f0f2f5;
+  --accent-foreground: #0f1217;
+
+  --destructive: #b33a25;
+  --destructive-foreground: #ffffff;
+
+  --success: #00766a;
+  --warning: #8a5800;
+  --info: #1a5fd0;
+  --comp: #5e45c8;
+  --off: #8a929c;
+
+  --border: #e3e6ea;
+  --input: #d2d7dd;
+  --ring: color-mix(in srgb, #1a5fd0 45%, transparent);
+
+  /* Chart marks (validated with the dataviz CVD checker). */
+  --chart-ok: #00897b;
+  --chart-fail: #d4462e;
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #d4462e;
+
+  --radius: 0.5rem;
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 9px;
+  --radius-xl: 10px;
+  --radius-2xl: 14px;
+  --radius-3xl: 20px;
+  --radius-4xl: 28px;
+}
+
+.dark {
+  /* Native controls (checkboxes, scrollbars, date inputs) follow the theme. */
+  color-scheme: dark;
+
+  --background: #0b0d10;
+  --foreground: #e6e8eb;
+
+  --card: #111418;
+  --card-foreground: #e6e8eb;
+
+  --popover: #181c22;
+  --popover-foreground: #e6e8eb;
+
+  --primary: #4c8dff;
+  --primary-foreground: #0b0d10;
+
+  --secondary: #181c22;
+  --secondary-foreground: #e6e8eb;
+
+  --muted: #161a20;
+  --muted-foreground: #8b939e;
+  --subtle-foreground: #a6adb7;
+
+  --accent: #1a1f26;
+  --accent-foreground: #e6e8eb;
+
+  --destructive: #f2785b;
+  --destructive-foreground: #0b0d10;
+
+  --success: #2bb3a3;
+  --warning: #e9b458;
+  --info: #7aaaff;
+  --comp: #b3a6f5;
+  --off: #6b7380;
+
+  --border: #22272e;
+  --input: #2e343c;
+  --ring: color-mix(in srgb, #4c8dff 55%, transparent);
+
+  --chart-ok: #23a094;
+  --chart-fail: #e8603f;
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #e8603f;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-comp: var(--comp);
+  --color-off: var(--off);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-chart-ok: var(--chart-ok);
+  --color-chart-fail: var(--chart-fail);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Elevation. Soft, layered shadows give surfaces depth (the old "no chrome /
+     elevation via background contrast only" rule read as flat/dull). Tuned to
+     stay subtle on dark and crisp on light. */
+  /* Elevation comes from hairlines and surface steps, not blur. Popovers keep
+     a real shadow because they float over content. */
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --shadow-pop: 0 4px 12px -2px oklch(0 0 0 / 0.3), 0 20px 40px -12px oklch(0 0 0 / 0.4);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body {
+    font-family: var(--font-sans);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Body text is 13px, but the root stays at the browser's 16px: Tailwind's
+     sizes are rem, so a 13px root shrank text-xs to 9.75px and every rem
+     spacing step by a fifth. */
+  body {
+    @apply bg-background text-foreground;
+    font-size: 13px;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ============================================================================
+ * Utility classes
+ * ========================================================================= */
+
+@utility text-heading {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+
+@utility text-numeric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "zero";
+}
+
+/* Accessibility: honour the OS "reduce motion" preference globally — disables
+   led-dot, dash-flow, animate-pulse, and all transitions. DESIGN.md §3/§9
+   promised this; it was missing. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================================
+ * ReactFlow theme overrides — kept since the FlowGraph island still uses it
+ * ========================================================================= */
+
+.react-flow {
+  background: color-mix(in oklch, var(--background) 60%, transparent);
+  --xy-background-color: transparent;
+  --xy-background-pattern-color: color-mix(in oklch, var(--foreground) 7%, transparent);
+  --xy-edge-stroke: color-mix(in oklch, var(--foreground) 28%, transparent);
+  --xy-edge-stroke-width: 1.25;
+  --xy-edge-stroke-selected: var(--primary);
+  --xy-connection-line-stroke: var(--primary);
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-button-background-color-hover: var(--accent);
+}
+
+.react-flow__node {
+  font-family: var(--font-sans);
+  /* Suppress the default white-rect node skin — our `nodeTypes` map
+     supplies fully-styled components for every type the dashboard emits. */
+  background: transparent;
+  border: none;
+  padding: 0;
+  box-shadow: none;
+  font-size: inherit;
+  color: inherit;
+}
+
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  background: color-mix(in oklch, var(--card) 85%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.react-flow__controls > button.react-flow__controls-button {
+  border-bottom: 1px solid var(--border);
+}
+
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: 4 3;
+  animation: dash-flow 1s linear infinite;
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+
+/* Status-driven edge styling — see DESIGN.md §11. The class is set on the
+   edge by `graph_builder.ex` after `overlay_status/3`. Override the
+   ReactFlow defaults via the `--xy-edge-stroke` custom property so the
+   default smoothstep / bezier paths pick it up without needing a custom
+   edge component. */
+.flow-edge-completed .react-flow__edge-path {
+  stroke: var(--success);
+  stroke-width: 1.5;
+}
+
+.flow-edge-running .react-flow__edge-path {
+  stroke: var(--primary);
+  stroke-width: 1.5;
+}
+
+.flow-edge-pending .react-flow__edge-path {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+/* Conditional edges — possible-but-not-default paths out of a decision
+   step (i.e. `{:goto, :target, data}` branches statically extracted by
+   `Durable.DSL.Step.build_decision/3`). Always dashed and muted so they
+   read as "alternative" rather than "fall-through" regardless of run
+   status. See DESIGN.md §11. */
+/* Legend swatches (flow_graph.tsx) mirror the edge classes below. */
+.legend-ran,
+.legend-running,
+.legend-untaken,
+.legend-pending {
+  stroke-width: 1.5;
+}
+.legend-ran {
+  stroke: var(--success);
+}
+.legend-running {
+  stroke: var(--primary);
+  stroke-dasharray: 4 3;
+}
+.legend-untaken {
+  stroke: var(--primary);
+  stroke-opacity: 0.55;
+  stroke-dasharray: 5 4;
+}
+.legend-pending {
+  stroke: var(--muted-foreground);
+  stroke-opacity: 0.6;
+  stroke-dasharray: 4 3;
+}
+
+.flow-edge-conditional .react-flow__edge-path {
+  stroke: var(--primary);
+  stroke-opacity: 0.55;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+}
+
+/* Edge interaction — hover and selection states.
+ *
+ * The status-driven `.flow-edge-{status}` classes set the resting stroke;
+ * these rules layer hover/selected on top so the user gets feedback that
+ * the edge is interactive. ReactFlow renders an invisible thicker
+ * `.react-flow__edge-interaction` overlay for the hit area, so the
+ * pointer events land naturally on the edge group. */
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke-width: 2;
+  filter: drop-shadow(0 0 3px color-mix(in oklch, var(--primary) 35%, transparent));
+}
+
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:focus .react-flow__edge-path,
+.react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: var(--primary);
+  stroke-width: 2.25;
+}
+
+.react-flow__edge:hover .react-flow__edge-textbg,
+.react-flow__edge.selected .react-flow__edge-textbg {
+  fill: color-mix(in oklch, var(--card) 88%, var(--primary) 12%);
+}
+
+.react-flow__edge:hover .react-flow__edge-text,
+.react-flow__edge.selected .react-flow__edge-text {
+  fill: var(--foreground);
+}
+
+/* ============================================================================
+ * LED status dot — used by status pills for active/running indicators
+ * ========================================================================= */
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 6px 0 currentColor;
+  }
+  50% {
+    opacity: 0.65;
+    box-shadow: 0 0 10px 1px currentColor;
+  }
+}
+
+.led-dot {
+  animation: led-pulse 1.6s ease-in-out infinite;
+}
+
+/* ============================================================================
+ * Status marks — shape + color, never color alone (DESIGN.md §4).
+ * Completed is a disc, failed a diamond, running a pulsing disc in the live
+ * blue, waiting a hollow ring, pending a dashed ring, cancelled a dash,
+ * compensation violet.
+ * ========================================================================= */
+
+.st-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.st-completed,
+.st-alive {
+  background: var(--success);
+}
+.st-running {
+  background: var(--primary);
+  animation: st-beat 1.6s ease-in-out infinite;
+}
+.st-waiting,
+.st-paused {
+  border: 2px solid var(--warning);
+}
+.st-pending,
+.st-idle,
+.st-scheduled {
+  border: 1.5px dashed var(--off);
+}
+.st-retrying {
+  border: 1.5px dashed var(--warning);
+}
+.st-snoozed {
+  border: 2px solid var(--off);
+}
+.st-cancelled {
+  width: 9px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--off);
+}
+.st-compensating {
+  background: var(--comp);
+  animation: st-beat 1.6s ease-in-out infinite;
+}
+.st-compensated {
+  background: var(--comp);
+}
+
+.st-failed,
+.st-timeout,
+.st-compensation_failed,
+.st-missing {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+  transform: rotate(45deg);
+  background: var(--destructive);
+}
+
+@keyframes st-beat {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent);
+    opacity: 1;
+  }
+  60% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 0%, transparent);
+    opacity: 0.7;
+  }
+}
+
+/* ============================================================================
+ * Copy button — the global copy listener (hooks/copy.ts) sets
+ * data-copied="true" for ~1.4s after a successful write; swap clipboard ⇄ check.
+ * ========================================================================= */
+
+.copy-btn .copy-done {
+  display: none;
+}
+
+.copy-btn[data-copied="true"] .copy-idle {
+  display: none;
+}
+
+.copy-btn[data-copied="true"] .copy-done {
+  display: inline-block;
+}
+
+.copy-btn[data-copied="true"] {
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 40%, transparent);
+}
+
+/* ============================================================================
+ * Scrollbar — thin, hairline thumb, used on log viewer and data surfaces
+ * ========================================================================= */
+
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thin-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 999px;
+}
+
+.thin-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklch, var(--foreground) 30%, transparent);
+}
+
+/* Sheet content default background gets the card surface. */
+[data-slot="sheet-content"] {
+  background-color: color-mix(in oklch, var(--card) 96%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+/* ---- Tooltip (`tooltip.ts`, DESIGN.md "Tooltips") ------------------------ */
+.dd-tip {
+  position: fixed;
+  z-index: 80;
+  left: 0;
+  top: 0;
+  max-width: 300px;
+  padding: 7px 10px 8px;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(3px);
+  transition:
+    opacity 110ms ease,
+    transform 110ms ease,
+    visibility 0s linear 110ms;
+}
+.dd-tip[data-side="bottom"] {
+  transform: translateY(-3px);
+}
+.dd-tip[data-open] {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 110ms ease,
+    transform 110ms ease;
+}
+.dd-tip-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.dd-tip-body {
+  color: var(--subtle-foreground);
+  white-space: pre-line;
+}
+.dd-tip-title + .dd-tip-body {
+  margin-top: 2px;
+}
+.dd-tip-meta {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+.dd-tip > .dd-tip-meta:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.dd-tip-kbd {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+.dd-tip-arrow {
+  position: absolute;
+  left: calc(var(--arrow-x, 50%) - 4px);
+  width: 8px;
+  height: 8px;
+  background: var(--popover);
+  border: 1px solid var(--input);
+  transform: rotate(45deg);
+}
+.dd-tip[data-side="top"] .dd-tip-arrow {
+  bottom: -5px;
+  border-top: 0;
+  border-left: 0;
+}
+.dd-tip[data-side="bottom"] .dd-tip-arrow {
+  top: -5px;
+  border-bottom: 0;
+  border-right: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dd-tip,
+  .dd-tip[data-open] {
+    transform: none;
+    transition: none;
+  }
+}

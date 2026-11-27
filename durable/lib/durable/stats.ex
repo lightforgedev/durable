@@ -1,0 +1,995 @@
+defmodule Durable.Stats do
+  @moduledoc """
+  Aggregate health of a Durable instance, read straight from its tables —
+  the numbers behind the dashboard's Overview and Workflow pages, available
+  to your own alerts and dashboards too.
+
+  Postgres is the source of truth here, so these work across nodes and
+  survive restarts; use `Durable.Telemetry` for live per-node signals.
+
+  ## Common options
+
+    * `:durable` — instance name (default `Durable`)
+    * `:since` / `:until` — the window (`DateTime`; default the last 24 hours)
+    * `:workflow` — limit to one workflow name
+    * `:include_children` — count child runs too (default `false`: parallel
+      fan-out and called workflows would otherwise inflate every number)
+
+  A run counts as *started* in the window by `inserted_at` and *finished* by
+  `completed_at`. "Failed" here means failed, rolled back (compensated) or
+  rollback-failed — every run that didn't do what it set out to.
+
+  ## Returns
+
+  Every function returns `{:ok, result}` or `{:error, reason}`, and has a twin
+  ending in `!` that returns the result or raises `ArgumentError`:
+
+      {:ok, stats} = Durable.Stats.overview(workflow: "fulfill_order")
+      stats = Durable.Stats.overview!(workflow: "fulfill_order")
+
+  An option of the wrong type or range is `{:error, {:invalid_option, key}}`:
+  a `:since` that isn't a `DateTime`, a negative `:limit`, `bucket_seconds: 0`.
+  `Durable.Query.Opts` has the whole contract.
+  """
+
+  import Ecto.Query
+
+  alias Durable.Clock
+  alias Durable.Config
+  alias Durable.Query.Opts
+  alias Durable.Repo
+
+  alias Durable.Storage.Schemas.{
+    ActivityEvent,
+    PendingEvent,
+    PendingInput,
+    Queue,
+    QueueSample,
+    StepExecution,
+    WorkflowExecution
+  }
+
+  @failed [:failed, :compensated, :compensation_failed]
+  @finished [:completed, :cancelled | @failed]
+  # timeline/1 builds a map for every bucket, empty or not.
+  @max_buckets 10_000
+
+  @options [
+    since: :datetime,
+    until: :datetime,
+    workflow: :text,
+    include_children: :boolean,
+    limit: :non_neg_integer,
+    bucket_seconds: :pos_integer
+  ]
+
+  defp read(opts, fun) do
+    with {:ok, opts} <- Opts.validate(opts, @options), do: {:ok, fun.(opts)}
+  end
+
+  @doc """
+  Headline numbers for the window:
+
+      %{
+        started: 12_482,
+        finished: %{completed: 12_031, failed: 180, compensated: 34, cancelled: 21, ...},
+        failure_rate: 0.017,            # failed-like ÷ finished
+        duration_ms: %{p50: 380, p95: 4_210, max: 11_800},   # completed runs
+        queue_wait_ms: %{p50: 120, p95: 1_300},             # scheduled → started
+        backlog: 37,                    # ready to start right now
+        waiting: %{input: 9, event: 96, sleeping: 23}       # right now
+      }
+
+  Returned as `{:ok, numbers}`; `overview!/1` returns the map itself.
+
+      {:ok, %{failure_rate: rate}} = Durable.Stats.overview(since: hour_ago)
+      %{failure_rate: rate} = Durable.Stats.overview!(since: hour_ago)
+  """
+  @spec overview(keyword()) :: {:ok, map()} | {:error, Opts.reason()}
+  def overview(opts \\ []), do: read(opts, &do_overview/1)
+
+  @doc "Like `overview/1`, but returns the numbers or raises `ArgumentError`."
+  @spec overview!(keyword()) :: map()
+  def overview!(opts \\ []), do: opts |> overview() |> Opts.unwrap!(opts)
+
+  defp do_overview(opts) do
+    {config, since, until} = window(opts)
+    runs = runs(opts)
+
+    finished =
+      Repo.all(
+        config,
+        from(w in runs,
+          where: w.status in ^@finished and w.completed_at >= ^since and w.completed_at < ^until,
+          group_by: w.status,
+          select: {w.status, count(w.id)}
+        )
+      )
+      |> Map.new()
+
+    total = finished |> Map.values() |> Enum.sum()
+    failed = @failed |> Enum.map(&Map.get(finished, &1, 0)) |> Enum.sum()
+
+    %{
+      started:
+        Repo.one(
+          config,
+          from(w in runs,
+            where: w.inserted_at >= ^since and w.inserted_at < ^until,
+            select: count(w.id)
+          )
+        ),
+      finished: finished,
+      failure_rate: if(total > 0, do: failed / total, else: 0.0),
+      duration_ms: duration_percentiles(config, runs, since, until),
+      queue_wait_ms: queue_wait_percentiles(config, runs, since, until),
+      backlog: Repo.one(config, from(w in ready(runs), select: count(w.id))),
+      waiting: waiting(config, opts)
+    }
+  end
+
+  @doc """
+  The window cut into `:bucket_seconds` (default: ~48 buckets), oldest
+  first, zero-filled:
+
+      [%{at: ~U[...], started: 260, completed: 251, failed: 6, cancelled: 1,
+         failure_rate: 0.023, p50_ms: 1_900, p95_ms: 4_200}, ...]
+
+  `failed` includes rolled-back runs; `p50_ms`/`p95_ms` are over runs
+  completed in the bucket (nil when none).
+
+  Every bucket is returned, empty or not, so a window cut into more than
+  10,000 of them returns `{:error, {:too_many_buckets, count}}` instead: ask
+  for a shorter window or a larger `:bucket_seconds`. A `:bucket_seconds` that
+  isn't a whole number above zero is `{:error, {:invalid_option, :bucket_seconds}}`.
+
+      {:ok, buckets} = Durable.Stats.timeline(bucket_seconds: 3_600)
+      buckets = Durable.Stats.timeline!(bucket_seconds: 3_600)
+  """
+  @spec timeline(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def timeline(opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts, @options),
+         {:ok, {span, bucket}} <- buckets(opts),
+         do: {:ok, timeline(opts, span, bucket)}
+  end
+
+  @doc "Like `timeline/1`, but returns the buckets or raises `ArgumentError`."
+  @spec timeline!(keyword()) :: [map()]
+  def timeline!(opts \\ []), do: opts |> timeline() |> Opts.unwrap!(opts)
+
+  # How long the window is and how long each bucket, unless that makes too many.
+  defp buckets(opts) do
+    {_config, since, until} = window(opts)
+    span = DateTime.diff(until, since, :second)
+    bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
+    count = div(max(span - 1, 0), bucket) + 1
+
+    if count > @max_buckets,
+      do: {:error, {:too_many_buckets, count}},
+      else: {:ok, {span, bucket}}
+  end
+
+  defp timeline(opts, span, bucket) do
+    {config, since, until} = window(opts)
+    runs = runs(opts)
+    origin = bucket_origin(since)
+
+    finished =
+      Repo.all(
+        config,
+        from(w in runs,
+          where: w.status in ^@finished and w.completed_at >= ^since and w.completed_at < ^until,
+          group_by: [fragment("bucket"), w.status],
+          select: {
+            fragment(
+              "floor((extract(epoch from ?) - ?) / ?)::int AS bucket",
+              w.completed_at,
+              ^origin,
+              ^bucket
+            ),
+            w.status,
+            count(w.id)
+          }
+        )
+      )
+
+    started =
+      Repo.all(
+        config,
+        from(w in runs,
+          where: w.inserted_at >= ^since and w.inserted_at < ^until,
+          group_by: fragment("bucket"),
+          select: {
+            fragment(
+              "floor((extract(epoch from ?) - ?) / ?)::int AS bucket",
+              w.inserted_at,
+              ^origin,
+              ^bucket
+            ),
+            count(w.id)
+          }
+        )
+      )
+      |> Map.new()
+
+    durations =
+      Repo.all(
+        config,
+        from(w in runs,
+          where: w.status == :completed and w.completed_at >= ^since and w.completed_at < ^until,
+          where: not is_nil(w.started_at),
+          group_by: fragment("bucket"),
+          select: {
+            fragment(
+              "floor((extract(epoch from ?) - ?) / ?)::int AS bucket",
+              w.completed_at,
+              ^origin,
+              ^bucket
+            ),
+            fragment(
+              "percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch from (? - ?)) * 1000)",
+              w.completed_at,
+              w.started_at
+            ),
+            fragment(
+              "percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch from (? - ?)) * 1000)",
+              w.completed_at,
+              w.started_at
+            )
+          }
+        )
+      )
+      |> Map.new(fn {b, p50, p95} -> {b, {round(p50), round(p95)}} end)
+
+    by_bucket = Enum.group_by(finished, &elem(&1, 0), &{elem(&1, 1), elem(&1, 2)})
+
+    for b <- 0..max(div(span - 1, bucket), 0) do
+      counts = Map.new(Map.get(by_bucket, b, []))
+      failed = @failed |> Enum.map(&Map.get(counts, &1, 0)) |> Enum.sum()
+      total = counts |> Map.values() |> Enum.sum()
+      {p50, p95} = Map.get(durations, b, {nil, nil})
+
+      %{
+        at: DateTime.add(since, b * bucket, :second),
+        started: Map.get(started, b, 0),
+        completed: Map.get(counts, :completed, 0),
+        failed: failed,
+        cancelled: Map.get(counts, :cancelled, 0),
+        failure_rate: if(total > 0, do: failed / total, else: 0.0),
+        p50_ms: p50,
+        p95_ms: p95
+      }
+    end
+  end
+
+  @doc """
+  Failures grouped by what went wrong: error type, message with numbers
+  replaced by `<n>` (so "timeout after 1503ms" and "after 1499ms" group), and
+  the step it happened at. Biggest group first.
+
+      [%{workflow: "fulfill_order", step: "ship_order", type: "RuntimeError",
+         message: "carrier API returned <n>", count: 41,
+         first_at: ~U[...], last_at: ~U[...], rolled_back: 41}]
+
+  `:limit` is the most groups returned (default 20).
+
+      {:ok, groups} = Durable.Stats.error_groups(limit: 5)
+      groups = Durable.Stats.error_groups!(limit: 5)
+  """
+  @spec error_groups(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def error_groups(opts \\ []), do: read(opts, &do_error_groups/1)
+
+  @doc "Like `error_groups/1`, but returns the groups or raises `ArgumentError`."
+  @spec error_groups!(keyword()) :: [map()]
+  def error_groups!(opts \\ []), do: opts |> error_groups() |> Opts.unwrap!(opts)
+
+  defp do_error_groups(opts) do
+    {config, since, until} = window(opts)
+
+    Repo.all(
+      config,
+      from(w in runs(opts),
+        where: w.status in ^@failed and w.completed_at >= ^since and w.completed_at < ^until,
+        group_by: [
+          w.workflow_name,
+          w.current_step,
+          fragment("? ->> 'type'", w.error),
+          fragment(
+            "regexp_replace(coalesce(? ->> 'message', ? ->> 'reason', ?::text), '[0-9]+', '<n>', 'g')",
+            w.error,
+            w.error,
+            w.error
+          )
+        ],
+        order_by: [desc: count(w.id)],
+        limit: ^Keyword.get(opts, :limit, 20),
+        select: %{
+          workflow: w.workflow_name,
+          type: fragment("? ->> 'type'", w.error),
+          message:
+            fragment(
+              "regexp_replace(coalesce(? ->> 'message', ? ->> 'reason', ?::text), '[0-9]+', '<n>', 'g')",
+              w.error,
+              w.error,
+              w.error
+            ),
+          step: w.current_step,
+          count: count(w.id),
+          first_at: min(w.completed_at),
+          last_at: max(w.completed_at),
+          rolled_back: filter(count(w.id), w.status == :compensated)
+        }
+      )
+    )
+  end
+
+  @doc """
+  Workflows with failures in the window, worst first, each with its biggest
+  error group:
+
+      [%{workflow: "fulfill_order", failed: 41, finished: 660, failure_rate: 0.062,
+         last_failed_at: ~U[...], top_error: %{type:, message:, step:, count:}}]
+
+  `:limit` is the most workflows returned (default 5).
+
+      {:ok, failing} = Durable.Stats.failing_workflows()
+      failing = Durable.Stats.failing_workflows!()
+  """
+  @spec failing_workflows(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def failing_workflows(opts \\ []), do: read(opts, &do_failing_workflows/1)
+
+  @doc "Like `failing_workflows/1`, but returns the workflows or raises `ArgumentError`."
+  @spec failing_workflows!(keyword()) :: [map()]
+  def failing_workflows!(opts \\ []), do: opts |> failing_workflows() |> Opts.unwrap!(opts)
+
+  defp do_failing_workflows(opts) do
+    {config, since, until} = window(opts)
+
+    rows =
+      Repo.all(
+        config,
+        from(w in runs(opts),
+          where: w.status in ^@finished and w.completed_at >= ^since and w.completed_at < ^until,
+          group_by: w.workflow_name,
+          having: filter(count(w.id), w.status in ^@failed) > 0,
+          order_by: [desc: filter(count(w.id), w.status in ^@failed)],
+          limit: ^Keyword.get(opts, :limit, 5),
+          select: %{
+            workflow: w.workflow_name,
+            failed: filter(count(w.id), w.status in ^@failed),
+            finished: count(w.id),
+            last_failed_at: filter(max(w.completed_at), w.status in ^@failed)
+          }
+        )
+      )
+
+    tops =
+      opts
+      |> Keyword.put(:limit, 200)
+      |> do_error_groups()
+      |> Enum.group_by(& &1.workflow)
+
+    Enum.map(rows, fn row ->
+      top = tops |> Map.get(row.workflow, []) |> List.first()
+
+      Map.merge(row, %{
+        failure_rate: row.failed / row.finished,
+        top_error: top && Map.take(top, [:type, :message, :step, :count])
+      })
+    end)
+  end
+
+  @doc """
+  Every workflow that has run, with its numbers for the window — one grouped
+  query, for a catalog page. Busiest first.
+
+      [%{workflow: "fulfill_order", module: "Elixir.App.Orders", started: 660,
+         finished: 655, failed: 41, failure_rate: 0.063, retried: 121,
+         p50_ms: 1_920, p95_ms: 4_210, running: 4, waiting: 0,
+         last_run_at: ~U[...]}]
+
+  `retried` counts runs where some step needed a second attempt. `running`,
+  `waiting` and `last_run_at` are as of now, not limited to the window.
+
+      {:ok, workflows} = Durable.Stats.workflows(since: day_ago)
+      workflows = Durable.Stats.workflows!(since: day_ago)
+  """
+  @spec workflows(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def workflows(opts \\ []), do: read(opts, &do_workflows/1)
+
+  @doc "Like `workflows/1`, but returns the workflows or raises `ArgumentError`."
+  @spec workflows!(keyword()) :: [map()]
+  def workflows!(opts \\ []), do: opts |> workflows() |> Opts.unwrap!(opts)
+
+  defp do_workflows(opts) do
+    {config, since, until} = window(opts)
+
+    config
+    |> Repo.all(
+      from(w in runs(opts),
+        as: :run,
+        group_by: [w.workflow_name, w.workflow_module],
+        order_by: [desc: max(w.inserted_at)],
+        select: %{
+          workflow: w.workflow_name,
+          module: w.workflow_module,
+          started: filter(count(w.id), w.inserted_at >= ^since and w.inserted_at < ^until),
+          finished:
+            filter(
+              count(w.id),
+              w.status in ^@finished and w.completed_at >= ^since and w.completed_at < ^until
+            ),
+          failed:
+            filter(
+              count(w.id),
+              w.status in ^@failed and w.completed_at >= ^since and w.completed_at < ^until
+            ),
+          # An Ecto subquery, not raw SQL, so the schema prefix applies to it.
+          retried:
+            filter(
+              count(w.id),
+              w.inserted_at >= ^since and w.inserted_at < ^until and
+                exists(
+                  from(s in StepExecution,
+                    where: s.workflow_id == parent_as(:run).id and s.attempt > 1,
+                    select: 1
+                  )
+                )
+            ),
+          p50_ms:
+            fragment(
+              "percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch from (? - ?)) * 1000) FILTER (WHERE ? = 'completed' AND ? >= ? AND ? < ?)",
+              w.completed_at,
+              w.started_at,
+              w.status,
+              w.completed_at,
+              ^since,
+              w.completed_at,
+              ^until
+            ),
+          p95_ms:
+            fragment(
+              "percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch from (? - ?)) * 1000) FILTER (WHERE ? = 'completed' AND ? >= ? AND ? < ?)",
+              w.completed_at,
+              w.started_at,
+              w.status,
+              w.completed_at,
+              ^since,
+              w.completed_at,
+              ^until
+            ),
+          running: filter(count(w.id), w.status == :running),
+          waiting: filter(count(w.id), w.status == :waiting),
+          last_run_at: max(w.inserted_at)
+        }
+      )
+    )
+    |> Enum.map(fn row ->
+      Map.merge(row, %{
+        failure_rate: if(row.finished > 0, do: row.failed / row.finished, else: 0.0),
+        p50_ms: round_ms(row.p50_ms),
+        p95_ms: round_ms(row.p95_ms)
+      })
+    end)
+  end
+
+  @doc """
+  Per-step performance over attempts that started in the window, in the
+  order steps first ran. Durations are active time — sleeps and waits are
+  not attempts. Compensations are included with `compensation: true`.
+
+  `failed_runs` counts runs whose last attempt at the step failed — runs that
+  gave up there, as opposed to `failed_attempts` that a retry recovered.
+
+      [%{workflow: "fulfill_order", step: "ship_order", compensation: false,
+         runs: 660, attempts: 771, failed_attempts: 117, failed_runs: 41,
+         retried_runs: 121, p50_ms: 640, p95_ms: 2_140, max_ms: 6_040}]
+
+      {:ok, steps} = Durable.Stats.step_performance(workflow: "fulfill_order")
+      steps = Durable.Stats.step_performance!(workflow: "fulfill_order")
+  """
+  @spec step_performance(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def step_performance(opts \\ []), do: read(opts, &do_step_performance/1)
+
+  @doc "Like `step_performance/1`, but returns the steps or raises `ArgumentError`."
+  @spec step_performance!(keyword()) :: [map()]
+  def step_performance!(opts \\ []), do: opts |> step_performance() |> Opts.unwrap!(opts)
+
+  defp do_step_performance(opts) do
+    {config, since, until} = window(opts)
+
+    query =
+      from(s in StepExecution,
+        as: :step,
+        join: w in WorkflowExecution,
+        on: w.id == s.workflow_id,
+        where: s.started_at >= ^since and s.started_at < ^until and s.status != :waiting,
+        group_by: [w.workflow_name, s.step_name],
+        order_by: [asc: min(s.started_at)],
+        select: %{
+          workflow: w.workflow_name,
+          step: s.step_name,
+          compensation: fragment("bool_or(?)", s.is_compensation),
+          runs: count(s.workflow_id, :distinct),
+          attempts: count(s.id),
+          failed_attempts: filter(count(s.id), s.status == :failed),
+          failed_runs:
+            filter(
+              count(s.workflow_id, :distinct),
+              s.status == :failed and
+                not exists(
+                  from(later in StepExecution,
+                    where:
+                      later.workflow_id == parent_as(:step).workflow_id and
+                        later.step_name == parent_as(:step).step_name and
+                        later.status != :waiting and
+                        later.started_at > parent_as(:step).started_at,
+                    select: 1
+                  )
+                )
+            ),
+          retried_runs:
+            fragment("count(DISTINCT ?) FILTER (WHERE ? > 1)", s.workflow_id, s.attempt),
+          p50_ms: fragment("percentile_cont(0.5) WITHIN GROUP (ORDER BY ?)", s.duration_ms),
+          p95_ms: fragment("percentile_cont(0.95) WITHIN GROUP (ORDER BY ?)", s.duration_ms),
+          max_ms: max(s.duration_ms)
+        }
+      )
+
+    query =
+      case Keyword.get(opts, :workflow) do
+        nil -> query
+        name -> from([s, w] in query, where: w.workflow_name == ^name)
+      end
+
+    config
+    |> Repo.all(query)
+    |> Enum.map(fn row -> %{row | p50_ms: round_ms(row.p50_ms), p95_ms: round_ms(row.p95_ms)} end)
+  end
+
+  @doc """
+  Every queue's state right now — configured queues are listed even when idle:
+
+      [%{queue: "default", paused: false, running: 8, ready: 31, scheduled: 412,
+         oldest_ready_at: ~U[...], done_last_5m: 910, wait_p95_ms: 1_300}]
+
+  `wait_p95_ms` is scheduled → started over the last hour.
+
+      {:ok, queues} = Durable.Stats.queues()
+      queues = Durable.Stats.queues!()
+  """
+  @spec queues(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def queues(opts \\ []), do: read(opts, &do_queues/1)
+
+  @doc "Like `queues/1`, but returns the queues or raises `ArgumentError`."
+  @spec queues!(keyword()) :: [map()]
+  def queues!(opts \\ []), do: opts |> queues() |> Opts.unwrap!(opts)
+
+  defp do_queues(opts) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+    now = Clock.utc_now()
+    hour_ago = DateTime.add(now, -3_600, :second)
+    five_min_ago = DateTime.add(now, -300, :second)
+
+    live =
+      Repo.all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.status in [:pending, :running],
+          group_by: w.queue,
+          select:
+            {w.queue,
+             %{
+               running: filter(count(w.id), w.status == :running),
+               ready:
+                 filter(
+                   count(w.id),
+                   w.status == :pending and (is_nil(w.scheduled_at) or w.scheduled_at <= ^now)
+                 ),
+               scheduled: filter(count(w.id), w.status == :pending and w.scheduled_at > ^now),
+               # A raw fragment loses the column type; cast it back so the
+               # result is a DateTime rather than a NaiveDateTime.
+               oldest_ready_at:
+                 type(
+                   fragment(
+                     "min(coalesce(?, ?)) FILTER (WHERE ? = 'pending' AND (? IS NULL OR ? <= ?))",
+                     w.scheduled_at,
+                     w.inserted_at,
+                     w.status,
+                     w.scheduled_at,
+                     w.scheduled_at,
+                     ^now
+                   ),
+                   :utc_datetime_usec
+                 )
+             }}
+        )
+      )
+      |> Map.new()
+
+    recent =
+      Repo.all(
+        config,
+        from(w in WorkflowExecution,
+          where: not is_nil(w.started_at) and w.started_at >= ^hour_ago,
+          group_by: w.queue,
+          select:
+            {w.queue,
+             %{
+               done_last_5m: filter(count(w.id), w.completed_at >= ^five_min_ago),
+               wait_p95_ms:
+                 fragment(
+                   "percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch from (? - coalesce(?, ?))) * 1000)",
+                   w.started_at,
+                   w.scheduled_at,
+                   w.inserted_at
+                 )
+             }}
+        )
+      )
+      |> Map.new()
+
+    paused =
+      MapSet.new(
+        Repo.all(config, from(q in Queue, where: not is_nil(q.paused_at), select: q.name))
+      )
+
+    names = Enum.map(Map.keys(config.queues), &to_string/1)
+
+    (names ++ Map.keys(live) ++ Map.keys(recent))
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map(fn name ->
+      l = Map.get(live, name, %{running: 0, ready: 0, scheduled: 0, oldest_ready_at: nil})
+      r = Map.get(recent, name, %{done_last_5m: 0, wait_p95_ms: nil})
+
+      Map.merge(l, %{
+        queue: name,
+        paused: MapSet.member?(paused, name),
+        done_last_5m: r.done_last_5m,
+        wait_p95_ms: round_ms(r.wait_p95_ms)
+      })
+    end)
+  end
+
+  @doc """
+  Each queue's depth per minute over the window, from `Durable.Queue.Sampler`,
+  oldest first. Minutes with no sample (no node was up) are absent.
+
+      %{"default" => [%{at: ~U[2026-10-16 09:00:00Z], ready: 31, scheduled: 4,
+                        running: 8, waiting: 120}, ...]}
+
+      {:ok, history} = Durable.Stats.queue_history(since: hour_ago)
+      history = Durable.Stats.queue_history!(since: hour_ago)
+  """
+  @spec queue_history(keyword()) :: {:ok, %{String.t() => [map()]}} | {:error, Opts.reason()}
+  def queue_history(opts \\ []), do: read(opts, &do_queue_history/1)
+
+  @doc "Like `queue_history/1`, but returns the history or raises `ArgumentError`."
+  @spec queue_history!(keyword()) :: %{String.t() => [map()]}
+  def queue_history!(opts \\ []), do: opts |> queue_history() |> Opts.unwrap!(opts)
+
+  defp do_queue_history(opts) do
+    {config, since, until} = window(opts)
+
+    config
+    |> Repo.all(
+      from(s in QueueSample,
+        where: s.at >= ^since and s.at <= ^until,
+        order_by: [asc: s.at],
+        select: %{
+          queue: s.queue,
+          at: s.at,
+          ready: s.ready,
+          scheduled: s.scheduled,
+          running: s.running,
+          waiting: s.waiting
+        }
+      )
+    )
+    |> Enum.group_by(& &1.queue, &Map.delete(&1, :queue))
+  end
+
+  @doc """
+  Workflow keys over the window, for one workflow with `:workflow` or for all:
+
+      %{
+        keyed: true,          # the workflow has started a run with a key
+        held: 1_284,          # keys held right now
+        readded: 3_912,       # starts that found their key taken
+        dropped: 41,          # ...whose input differed and was dropped
+        errors: 12,           # ...answered with {:error, {:key_taken, id}}
+        replaced: 3,          # ...that cancelled the holder (:cancel_existing)
+        sent: 9,              # ...sent to the holder as an event ({:send_event, _})
+        debounced: 30,        # ...that gave a debounced run newer input
+        handed_off: 87,       # keys a start took from a finished run
+        timeline: [%{at: ~U[...], returned: 160, errors: 1, replaced: 0,
+                     sent: 2, debounced: 5}, ...],
+        top: [%{key: "article:17", readded: 48, dropped: 0,
+                holder_id: "…", holder_status: :completed}, ...]
+      }
+
+  The counts come from `Durable.Activity`, which keeps a week, so they cover
+  at most the last 7 days. `:bucket_seconds` and `:limit` (top keys, default
+  10) are optional. Its timeline has every bucket, so like `timeline/1` a
+  window cut into more than 10,000 is `{:error, {:too_many_buckets, count}}`.
+
+      {:ok, %{held: held}} = Durable.Stats.keys(workflow: "process_article")
+      %{held: held} = Durable.Stats.keys!(workflow: "process_article")
+  """
+  @spec keys(keyword()) :: {:ok, map()} | {:error, Opts.reason()}
+  def keys(opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts, @options),
+         {:ok, _buckets} <- buckets(opts),
+         do: {:ok, do_keys(opts)}
+  end
+
+  @doc "Like `keys/1`, but returns the numbers or raises `ArgumentError`."
+  @spec keys!(keyword()) :: map()
+  def keys!(opts \\ []), do: opts |> keys() |> Opts.unwrap!(opts)
+
+  defp do_keys(opts) do
+    {config, since, until} = window(opts)
+    runs = runs(opts)
+
+    events =
+      from(a in ActivityEvent,
+        where: a.at >= ^since and a.at < ^until,
+        where: a.kind in ["key_duplicate", "key_handed_off"]
+      )
+
+    events =
+      case Keyword.get(opts, :workflow) do
+        nil -> events
+        name -> from(a in events, where: fragment("?->>'workflow' = ?", a.details, ^name))
+      end
+
+    totals =
+      Repo.all(
+        config,
+        from(a in events,
+          group_by: [a.kind, fragment("outcome"), fragment("changed")],
+          select: {
+            a.kind,
+            fragment("?->>'outcome' AS outcome", a.details),
+            fragment("coalesce((?->>'input_changed')::boolean, false) AS changed", a.details),
+            count(a.id)
+          }
+        )
+      )
+
+    by_outcome =
+      for {"key_duplicate", outcome, _changed, n} <- totals, reduce: %{} do
+        acc -> Map.update(acc, outcome, n, &(&1 + n))
+      end
+
+    count = &Map.get(by_outcome, &1, 0)
+
+    %{
+      keyed:
+        Repo.one(config, from(w in runs, where: not is_nil(w.key), select: true, limit: 1)) ==
+          true,
+      held: Repo.aggregate(config, from(w in runs, where: w.holds_key), :count),
+      readded: by_outcome |> Map.values() |> Enum.sum(),
+      dropped: Enum.sum(for {"key_duplicate", "use_existing", true, n} <- totals, do: n),
+      errors: count.("error"),
+      replaced: count.("cancel_existing"),
+      sent: count.("send_event"),
+      debounced: count.("debounced"),
+      handed_off: Enum.sum(for {"key_handed_off", _, _, n} <- totals, do: n),
+      timeline: key_timeline(config, events, since, until, opts),
+      top: top_keys(config, events, runs, Keyword.get(opts, :limit, 10))
+    }
+  end
+
+  defp key_timeline(config, events, since, until, opts) do
+    span = DateTime.diff(until, since, :second)
+    bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
+    origin = bucket_origin(since)
+
+    counts =
+      Repo.all(
+        config,
+        from(a in events,
+          where: a.kind == "key_duplicate",
+          group_by: [fragment("bucket"), fragment("outcome")],
+          select: {
+            fragment(
+              "floor((extract(epoch from ?) - ?) / ?)::int AS bucket",
+              a.at,
+              ^origin,
+              ^bucket
+            ),
+            fragment("?->>'outcome' AS outcome", a.details),
+            count(a.id)
+          }
+        )
+      )
+      |> Map.new(fn {b, outcome, n} -> {{b, outcome}, n} end)
+
+    for b <- 0..max(div(span - 1, bucket), 0) do
+      %{
+        at: DateTime.add(since, b * bucket, :second),
+        returned: Map.get(counts, {b, "use_existing"}, 0),
+        errors: Map.get(counts, {b, "error"}, 0),
+        replaced: Map.get(counts, {b, "cancel_existing"}, 0),
+        sent: Map.get(counts, {b, "send_event"}, 0),
+        debounced: Map.get(counts, {b, "debounced"}, 0)
+      }
+    end
+  end
+
+  defp top_keys(config, events, runs, limit) do
+    top =
+      Repo.all(
+        config,
+        from(a in events,
+          where: a.kind == "key_duplicate",
+          group_by: fragment("1"),
+          order_by: [desc: count(a.id)],
+          limit: ^limit,
+          select: {
+            fragment("?->>'key'", a.details),
+            count(a.id),
+            fragment(
+              "count(*) FILTER (WHERE ?->>'outcome' = 'use_existing' AND (?->>'input_changed')::boolean)",
+              a.details,
+              a.details
+            )
+          }
+        )
+      )
+
+    keys = Enum.map(top, &elem(&1, 0))
+
+    holders =
+      Repo.all(
+        config,
+        from(w in runs, where: w.holds_key and w.key in ^keys, select: {w.key, {w.id, w.status}})
+      )
+      |> Map.new()
+
+    for {key, readded, dropped} <- top do
+      {holder_id, status} = Map.get(holders, key, {nil, nil})
+
+      %{
+        key: key,
+        readded: readded,
+        dropped: dropped,
+        holder_id: holder_id,
+        holder_status: status
+      }
+    end
+  end
+
+  # --------------------------------------------------------------------------
+
+  # Bucket 0 starts exactly at `since`, microseconds included: truncating it to
+  # the second would push anything in the window's last fraction of a second
+  # into a bucket past the end.
+  defp bucket_origin(since), do: DateTime.to_unix(since, :microsecond) / 1_000_000
+
+  defp window(opts) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+    until = Keyword.get(opts, :until, Clock.utc_now())
+    since = Keyword.get(opts, :since, DateTime.add(until, -86_400, :second))
+    {config, since, until}
+  end
+
+  defp runs(opts) do
+    query = WorkflowExecution
+
+    query =
+      if Keyword.get(opts, :include_children, false),
+        do: query,
+        else: from(w in query, where: is_nil(w.parent_workflow_id))
+
+    case Keyword.get(opts, :workflow) do
+      nil -> query
+      name -> from(w in query, where: w.workflow_name == ^name)
+    end
+  end
+
+  defp ready(runs) do
+    now = Clock.utc_now()
+
+    from(w in runs,
+      where: w.status == :pending and (is_nil(w.scheduled_at) or w.scheduled_at <= ^now)
+    )
+  end
+
+  defp duration_percentiles(config, runs, since, until) do
+    Repo.one(
+      config,
+      from(w in runs,
+        where: w.status == :completed and w.completed_at >= ^since and w.completed_at < ^until,
+        where: not is_nil(w.started_at),
+        select: %{
+          p50:
+            fragment(
+              "percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch from (? - ?)) * 1000)",
+              w.completed_at,
+              w.started_at
+            ),
+          p95:
+            fragment(
+              "percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch from (? - ?)) * 1000)",
+              w.completed_at,
+              w.started_at
+            ),
+          max: fragment("max(extract(epoch from (? - ?)) * 1000)", w.completed_at, w.started_at)
+        }
+      )
+    )
+    |> Map.new(fn {k, v} -> {k, round_ms(v)} end)
+  end
+
+  defp queue_wait_percentiles(config, runs, since, until) do
+    Repo.one(
+      config,
+      from(w in runs,
+        where: w.inserted_at >= ^since and w.inserted_at < ^until and not is_nil(w.started_at),
+        select: %{
+          p50:
+            fragment(
+              "percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch from (? - coalesce(?, ?))) * 1000)",
+              w.started_at,
+              w.scheduled_at,
+              w.inserted_at
+            ),
+          p95:
+            fragment(
+              "percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch from (? - coalesce(?, ?))) * 1000)",
+              w.started_at,
+              w.scheduled_at,
+              w.inserted_at
+            )
+        }
+      )
+    )
+    |> Map.new(fn {k, v} -> {k, round_ms(v)} end)
+  end
+
+  # Internal events (`__parallel_done:…`, `__child_done:…`) are plumbing, not
+  # something a person is waiting on.
+  defp waiting(config, opts) do
+    workflow = Keyword.get(opts, :workflow)
+
+    scope = fn query ->
+      if workflow,
+        do: from([x, w] in query, where: w.workflow_name == ^workflow),
+        else: query
+    end
+
+    inputs =
+      from(p in PendingInput,
+        join: w in WorkflowExecution,
+        on: w.id == p.workflow_id,
+        where: p.status == :pending
+      )
+
+    events =
+      from(e in PendingEvent,
+        join: w in WorkflowExecution,
+        on: w.id == e.workflow_id,
+        where: e.status == :pending and not like(e.event_name, "\\_\\_%")
+      )
+
+    sleeping =
+      from(w in WorkflowExecution, where: w.status == :waiting and not is_nil(w.scheduled_at))
+
+    sleeping =
+      if workflow, do: from(w in sleeping, where: w.workflow_name == ^workflow), else: sleeping
+
+    %{
+      input: Repo.one(config, from([p] in scope.(inputs), select: count(p.id))),
+      event: Repo.one(config, from([e] in scope.(events), select: count(e.id))),
+      sleeping: Repo.one(config, from(w in sleeping, select: count(w.id)))
+    }
+  end
+
+  defp round_ms(nil), do: nil
+  defp round_ms(value) when is_float(value), do: round(value)
+  defp round_ms(%Decimal{} = value), do: value |> Decimal.round() |> Decimal.to_integer()
+  defp round_ms(value), do: value
+end

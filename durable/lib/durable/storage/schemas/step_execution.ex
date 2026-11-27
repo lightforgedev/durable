@@ -1,0 +1,167 @@
+defmodule Durable.Storage.Schemas.StepExecution do
+  @moduledoc """
+  Ecto schema for step execution records.
+
+  Each step execution represents a single execution attempt of a workflow step,
+  tracking its status, timing, and captured logs.
+  """
+
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  alias Durable.Clock
+
+  @type status ::
+          :pending | :running | :completed | :failed | :waiting | :cancelled | :snoozed
+
+  @type t :: %__MODULE__{
+          id: Ecto.UUID.t(),
+          workflow_id: Ecto.UUID.t(),
+          step_name: String.t(),
+          step_type: String.t(),
+          attempt: integer(),
+          session_id: String.t() | nil,
+          status: status(),
+          input: map() | nil,
+          output: map() | nil,
+          error: map() | nil,
+          logs: list(map()),
+          started_at: DateTime.t() | nil,
+          completed_at: DateTime.t() | nil,
+          duration_ms: integer() | nil,
+          compensation_for: String.t() | nil,
+          is_compensation: boolean(),
+          inserted_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  @schema_prefix "durable"
+  schema "step_executions" do
+    field(:step_name, :string)
+    field(:step_type, :string, default: "step")
+    field(:attempt, :integer, default: 1)
+    field(:session_id, :string)
+
+    field(:status, Ecto.Enum,
+      values: [:pending, :running, :completed, :failed, :waiting, :cancelled, :snoozed],
+      default: :pending
+    )
+
+    field(:input, Durable.Storage.JsonMap)
+    field(:output, Durable.Storage.JsonMap)
+    field(:error, :map)
+    field(:logs, {:array, :map}, default: [])
+    field(:started_at, :utc_datetime_usec)
+    field(:completed_at, :utc_datetime_usec)
+    field(:duration_ms, :integer)
+
+    # Compensation/Saga support
+    field(:compensation_for, :string)
+    field(:is_compensation, :boolean, default: false)
+
+    # Queryable parent→child link: the WorkflowExecution this step spawned via
+    # `call_workflow`/`start_workflow`. Lets step→child be resolved directly
+    # instead of parsing the parent's mutable `__call_children` JSONB context.
+    field(:child_workflow_id, :binary_id)
+
+    belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
+
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
+  end
+
+  @required_fields [:workflow_id, :step_name]
+  @optional_fields [
+    :step_type,
+    :attempt,
+    :session_id,
+    :status,
+    :input,
+    :output,
+    :error,
+    :logs,
+    :started_at,
+    :completed_at,
+    :duration_ms,
+    :compensation_for,
+    :is_compensation,
+    :child_workflow_id
+  ]
+
+  @doc """
+  Creates a changeset for inserting a new step execution.
+  """
+  def changeset(step_execution, attrs) do
+    step_execution
+    |> cast(attrs, @required_fields ++ @optional_fields)
+    |> validate_required(@required_fields)
+    |> foreign_key_constraint(:workflow_id)
+  end
+
+  @doc """
+  Creates a changeset for starting step execution.
+  """
+  def start_changeset(step_execution) do
+    step_execution
+    |> cast(%{status: :running, started_at: Clock.utc_now()}, [:status, :started_at])
+  end
+
+  @doc """
+  Creates a changeset for completing step execution.
+  """
+  def complete_changeset(step_execution, output, logs, duration_ms) do
+    step_execution
+    |> cast(
+      %{
+        status: :completed,
+        session_id: extract_session_id(output),
+        output: output,
+        logs: logs,
+        completed_at: Clock.utc_now(),
+        duration_ms: duration_ms
+      },
+      [:status, :session_id, :output, :logs, :completed_at, :duration_ms]
+    )
+  end
+
+  # Lightforge carry: an agent step's output names the session it ran.
+  defp extract_session_id(%{"session_id" => session_id})
+       when is_binary(session_id) and byte_size(session_id) > 0,
+       do: session_id
+
+  defp extract_session_id(%{session_id: session_id})
+       when is_binary(session_id) and byte_size(session_id) > 0,
+       do: session_id
+
+  defp extract_session_id(_output), do: nil
+
+  @doc """
+  Creates a changeset for a step execution that ended without completing:
+  `:failed`, `:cancelled` when the step returned `{:cancel, reason}`, or
+  `:snoozed` when it returned `{:snooze, ms}`.
+  """
+  def fail_changeset(step_execution, error, logs, duration_ms, status \\ :failed) do
+    step_execution
+    |> cast(
+      %{
+        status: status,
+        error: error,
+        logs: logs,
+        completed_at: Clock.utc_now(),
+        duration_ms: duration_ms
+      },
+      [:status, :error, :logs, :completed_at, :duration_ms]
+    )
+  end
+
+  @doc """
+  Appends logs to an existing step execution.
+  """
+  def append_logs_changeset(step_execution, new_logs) do
+    current_logs = step_execution.logs || []
+
+    step_execution
+    |> cast(%{logs: current_logs ++ new_logs}, [:logs])
+  end
+end

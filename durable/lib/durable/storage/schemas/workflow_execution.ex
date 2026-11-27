@@ -1,0 +1,329 @@
+defmodule Durable.Storage.Schemas.WorkflowExecution do
+  @moduledoc """
+  Ecto schema for workflow execution records.
+
+  Each workflow execution represents a single run of a workflow, tracking its
+  status, context, and progress through steps.
+  """
+
+  use Ecto.Schema
+  import Ecto.Changeset
+  require Ecto.Query
+
+  alias Durable.Clock
+
+  @type status ::
+          :pending
+          | :running
+          | :completed
+          | :failed
+          | :waiting
+          | :cancelled
+          | :compensating
+          | :compensated
+          | :compensation_failed
+
+  @type t :: %__MODULE__{
+          id: Ecto.UUID.t(),
+          workflow_module: String.t(),
+          workflow_name: String.t(),
+          status: status(),
+          queue: String.t(),
+          priority: integer(),
+          input: map(),
+          context: map(),
+          engine_state: map(),
+          current_step: String.t() | nil,
+          error: map() | nil,
+          parent_workflow_id: Ecto.UUID.t() | nil,
+          root_workflow_id: Ecto.UUID.t() | nil,
+          scheduled_at: DateTime.t() | nil,
+          started_at: DateTime.t() | nil,
+          completed_at: DateTime.t() | nil,
+          locked_by: String.t() | nil,
+          locked_at: DateTime.t() | nil,
+          compensation_results: list(map()),
+          compensated_at: DateTime.t() | nil,
+          retried_at: DateTime.t() | nil,
+          trigger: :api | :schedule | :parent | :rerun | nil,
+          trigger_ref: String.t() | nil,
+          key: String.t() | nil,
+          key_scope: String.t() | nil,
+          holds_key: boolean(),
+          tags: [String.t()],
+          runs_after_id: Ecto.UUID.t() | nil,
+          home_queue: String.t() | nil,
+          inserted_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  @schema_prefix "durable"
+  schema "workflow_executions" do
+    field(:workflow_module, :string)
+    field(:workflow_name, :string)
+
+    field(:status, Ecto.Enum,
+      values: [
+        :pending,
+        :running,
+        :completed,
+        :failed,
+        :waiting,
+        :cancelled,
+        :compensating,
+        :compensated,
+        :compensation_failed
+      ],
+      default: :pending
+    )
+
+    field(:queue, :string, default: "default")
+    field(:priority, :integer, default: 0)
+    field(:input, Durable.Storage.JsonMap, default: %{})
+    field(:context, Durable.Storage.JsonMap, default: %{})
+    # The engine's own state for the run. Never the user's data: see
+    # Durable.EngineState. A run this engine creates has its mark from the start.
+    field(:engine_state, Durable.Storage.JsonMap, default: %{"v" => 1})
+    field(:current_step, :string)
+    field(:error, :map)
+    field(:parent_workflow_id, :binary_id)
+    # The run at the top of this run's tree; nil on a top run.
+    field(:root_workflow_id, :binary_id)
+    field(:scheduled_at, :utc_datetime_usec)
+    field(:started_at, :utc_datetime_usec)
+    field(:completed_at, :utc_datetime_usec)
+    field(:locked_by, :string)
+    field(:locked_at, :utc_datetime_usec)
+    # Per-claim fencing token (fresh UUID stamped on each claim). Lets a worker
+    # detect its claim was superseded by stale-lock recovery + reclaim.
+    field(:lock_token, :binary_id)
+
+    # Compensation/Saga support
+    field(:compensation_results, {:array, :map}, default: [])
+    field(:compensated_at, :utc_datetime_usec)
+
+    # Operator controls: when Durable.retry/2 last resumed this run (attempt
+    # budgets count from here), and what started it.
+    field(:retried_at, :utc_datetime_usec)
+    field(:trigger, Ecto.Enum, values: [:api, :schedule, :parent, :rerun], default: :api)
+    field(:trigger_ref, :string)
+
+    # Set from the workflow's `timeout:` when the run is created; a run past it
+    # fails with a "timeout" error before its next step.
+    field(:deadline_at, :utc_datetime_usec)
+
+    # Workflow key (`Durable.start(..., key: "article:42")`). Every keyed run
+    # keeps its key; the one run per workflow and key that holds it has
+    # `holds_key`. Status changes never write `holds_key` — see Durable.Keys.
+    field(:key, :string)
+    field(:holds_key, :boolean, default: false)
+    # The workflow's `key_scope:` when the run was started: its key is shared
+    # with every workflow's under that name. nil, it's the workflow's own.
+    field(:key_scope, :string)
+    field(:tags, {:array, :string}, default: [])
+    # A run waiting for this run to end before it takes the key (run_again).
+    field(:runs_after_id, :binary_id)
+    # The queue to go back to while a step's `queue:` has the run elsewhere.
+    # `queue` is always where the run is claimed now.
+    field(:home_queue, :string)
+
+    has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
+    has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
+
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
+  end
+
+  @required_fields [:workflow_module, :workflow_name]
+  @optional_fields [
+    :status,
+    :queue,
+    :priority,
+    :input,
+    :context,
+    :engine_state,
+    :current_step,
+    :error,
+    :parent_workflow_id,
+    :root_workflow_id,
+    :scheduled_at,
+    :started_at,
+    :completed_at,
+    :locked_by,
+    :locked_at,
+    :compensation_results,
+    :compensated_at,
+    :trigger,
+    :trigger_ref,
+    :deadline_at,
+    :key,
+    :key_scope,
+    :tags
+  ]
+
+  @open_statuses [:pending, :running, :waiting, :compensating]
+  @closed_statuses [:completed, :failed, :cancelled, :compensated, :compensation_failed]
+
+  # Which closed holders a new start may take a key from, per `reuse:` policy.
+  # Open holders always keep their key.
+  @reusable %{
+    after_close: @closed_statuses,
+    after_failure: @closed_statuses -- [:completed],
+    never: []
+  }
+
+  @doc """
+  Creates a changeset for inserting a new workflow execution.
+  """
+  def changeset(execution, attrs) do
+    execution
+    |> cast(attrs, (@required_fields ++ @optional_fields) -- [:key, :key_scope])
+    # A scope is kept as given too: " " is a name `Keys.scope/1` and the lock use.
+    |> cast(attrs, [:key_scope], empty_values: [])
+    |> validate_required(@required_fields)
+    |> cast_key(attrs)
+    |> holder_constraints()
+  end
+
+  @doc false
+  # A key is any string of 1 to 255 bytes, kept as given. `cast/3` on its own
+  # turns "" and "\t" (any blank string) into nil: the start went on as keyed
+  # with no key, and a schedule fired with none.
+  @spec cast_key(Ecto.Changeset.t(), map()) :: Ecto.Changeset.t()
+  def cast_key(changeset, attrs) do
+    changeset
+    |> cast(attrs, [:key], empty_values: [])
+    |> validate_length(:key, min: 1, max: 255, count: :bytes)
+    |> validate_change(:key, fn :key, key ->
+      if Durable.Repo.bad_text?(key), do: [key: "can't be stored"], else: []
+    end)
+  end
+
+  @doc false
+  # The unique indexes a run taking its key can meet: its workflow's, and its
+  # `key_scope:`'s.
+  @spec holder_constraints(Ecto.Changeset.t()) :: Ecto.Changeset.t()
+  def holder_constraints(changeset) do
+    changeset
+    |> unique_constraint(:key, name: :workflow_executions_key_holder_index)
+    |> unique_constraint(:key, name: :workflow_executions_key_scope_holder_index)
+  end
+
+  @doc false
+  # For an update that stops runs (a cancel). A run a worker had begun keeps
+  # that worker's lock, with no token, until the worker has stopped its step
+  # and let go (`Postgres.let_go/2`), or the lock went stale. Nothing else of
+  # its key is claimed meanwhile, nor an undo of its tree (rule 15). A worker
+  # that can't reach the database never hears of the stop, and stops its step
+  # before its lock goes stale (`Worker.lease_lost?/1`). Claimed but not
+  # begun, a run has no step to wait for: its worker finds the claim gone.
+  def keeping_worker(query) do
+    Ecto.Query.update(query, [w],
+      set: [
+        locked_by:
+          fragment(
+            "CASE WHEN ? = 'running' AND ? IS NOT NULL THEN ? END",
+            w.status,
+            w.started_at,
+            w.locked_by
+          ),
+        locked_at:
+          fragment(
+            "CASE WHEN ? = 'running' AND ? IS NOT NULL THEN ? END",
+            w.status,
+            w.started_at,
+            w.locked_at
+          ),
+        lock_token: nil
+      ]
+    )
+  end
+
+  @doc "Statuses of a run that's still going: it always keeps its key."
+  @spec open_statuses() :: [status()]
+  def open_statuses, do: @open_statuses
+
+  @doc "Statuses of a finished run."
+  @spec closed_statuses() :: [status()]
+  def closed_statuses, do: @closed_statuses
+
+  @doc "The `reuse:` policies a workflow can declare."
+  @spec reuse_policies() :: [atom()]
+  def reuse_policies, do: Map.keys(@reusable)
+
+  @doc """
+  The statuses a key's holder can be in for a new start to take the key under
+  `policy`. Open holders never give it up.
+  """
+  @spec reusable_statuses(atom()) :: [status()]
+  def reusable_statuses(policy), do: Map.fetch!(@reusable, policy)
+
+  @doc """
+  Creates a changeset for updating workflow status.
+  """
+  def status_changeset(execution, status, attrs \\ %{}) do
+    execution
+    |> cast(Map.put(attrs, :status, status), [
+      :status,
+      :current_step,
+      :error,
+      :started_at,
+      :completed_at,
+      :context
+    ])
+  end
+
+  @doc """
+  Creates a changeset for locking a workflow for execution.
+  """
+  def lock_changeset(execution, locked_by) do
+    execution
+    |> cast(%{locked_by: locked_by, locked_at: Clock.utc_now()}, [:locked_by, :locked_at])
+  end
+
+  @doc """
+  Creates a changeset for marking workflow as compensating.
+  """
+  def compensating_changeset(execution) do
+    execution
+    |> cast(%{status: :compensating}, [:status])
+  end
+
+  @doc """
+  Creates a changeset for marking workflow as compensated (all compensations succeeded).
+  """
+  def compensated_changeset(execution, results) do
+    now = Clock.utc_now()
+
+    # A rolled-back run is finished too: completed_at marks the end of every
+    # terminal run, so durations and retention treat them alike.
+    execution
+    |> cast(
+      %{
+        status: :compensated,
+        compensation_results: results,
+        compensated_at: now,
+        completed_at: now
+      },
+      [:status, :compensation_results, :compensated_at, :completed_at]
+    )
+  end
+
+  @doc """
+  Creates a changeset for marking workflow compensation as failed.
+  """
+  def compensation_failed_changeset(execution, results, error) do
+    execution
+    |> cast(
+      %{
+        status: :compensation_failed,
+        compensation_results: results,
+        error: error,
+        compensated_at: Clock.utc_now(),
+        completed_at: Clock.utc_now()
+      },
+      [:status, :compensation_results, :error, :compensated_at, :completed_at]
+    )
+  end
+end

@@ -1,0 +1,619 @@
+# Running in production
+
+Durable works with its defaults, but a few of them suit development more than
+production, and Postgres needs some help with tables that change this often.
+This guide covers what to set before you go live, what to keep an eye on, and
+how to deploy without disturbing running work.
+
+The numbers below were measured on a laptop with Postgres 18 in Docker, using a
+3-step workflow whose steps do nothing, so they show Durable's own overhead. Use
+them as ratios, not as a forecast.
+
+## Before you go live
+
+- **Turn on pruning.** It's off by default, so finished runs stay forever.
+- **Stop storing every log line.** By default each step's logs go in the
+  database at every level.
+- **Give Durable a PubSub**, so new work starts at once and you can poll less.
+- **Make steps safe to run twice.** Delivery is at least once. A step that
+  charges a card, books something or sends an email needs an idempotency key.
+- **Give a step retries if it should survive a crash.** A step whose process
+  dies has used an attempt, so with no `retry:` (one attempt) the run fails.
+  Losing its node or its lock doesn't use one, and nor does a deploy that hands
+  runs back.
+- **Give nodes time to stop.** Your platform's shutdown limit should be longer
+  than Durable's grace period, 15 seconds by default.
+- **Tune autovacuum** for the two busiest tables.
+- **Report metrics**, and alert on the handful that matter.
+
+This covers the first three:
+
+```elixir
+# In the supervision tree
+{Durable,
+ repo: MyApp.Repo,
+ pubsub: MyApp.PubSub,
+ queues: %{
+   default: [concurrency: 20, poll_interval: 5_000]
+ },
+ prune: [
+   completed: :timer.hours(24 * 7),
+   cancelled: :timer.hours(24 * 7),
+   failed: :timer.hours(24 * 30)
+ ]}
+
+# config/prod.exs
+config :durable, log_capture: [levels: [:warning, :error]]
+```
+
+## What a run costs
+
+Each 3-step run took 23 queries, one insert and nine updates on its run row, and
+three inserts and six updates on its step rows. That's about 3 KB on disk, and
+15 dead row versions for Postgres to clean up. More steps and retries add to all
+of these.
+
+What you store matters far more than the bookkeeping:
+
+| Run | Stored per run |
+|---|---|
+| 2 steps, 10 info lines each, default log capture | 7.9 KB of step data |
+| The same, with `levels: [:warning, :error]` | 1.6 KB of step data |
+| 3 steps carrying a 100 KB payload | 637 KB in all |
+
+Each step stores its input and output, and the run's context is rewritten as it
+goes, so a payload is written several times over. Pass an id or an object store
+key through your workflow, not the file itself.
+
+## Retention
+
+With `prune:` set, each node runs the pruner once an hour, in batches of 5,000.
+Batches skip rows another node has locked, so nodes don't get in each other's
+way. Deleting 100,000 runs and their 300,000 step rows took 4 seconds.
+
+- `failed` covers failed, compensated and compensation-failed runs. Statuses you
+  leave out are kept forever.
+- Steps, inputs and events go with their run. Child runs are pruned on their own
+  age.
+- Pending, running and waiting runs are never pruned.
+- A failed run waiting out its workflow's `rollback_after:` isn't pruned until
+  it has been rolled back.
+- **A pruned run's workflow key is free again.** Keep runs for longer than you
+  rely on a key to catch duplicates.
+
+To prune now, call `Durable.prune()`, or press Prune now on the dashboard's
+Settings page. For a one-off with different rules, `mix durable.cleanup
+--older-than 30d --dry-run` shows what it would delete.
+
+Pruning makes room for new rows rather than shrinking the files. In the test
+above, the tables were the same size after the delete, and the indexes kept all
+their space even after `VACUUM`. If you cut retention sharply, see
+[reindexing](#reindex-after-a-big-cleanup).
+
+Finished runs don't slow down claiming: a claim took 0.41 ms with no history and
+0.43 ms with 500,000 finished runs. Retention is about disk, backups and how long
+vacuum takes.
+
+## Postgres upkeep
+
+### Tune autovacuum
+
+By default Postgres vacuums a table once about 20% of it is dead. On a large
+`workflow_executions` table, that's a lot of dead rows before anything happens.
+Lower it for the two tables that change most:
+
+```elixir
+defmodule MyApp.Repo.Migrations.TuneDurableVacuum do
+  use Ecto.Migration
+
+  def up do
+    for table <- ~w(workflow_executions step_executions) do
+      execute("""
+      ALTER TABLE durable.#{table} SET (
+        autovacuum_vacuum_scale_factor = 0.02,
+        autovacuum_analyze_scale_factor = 0.02
+      )
+      """)
+    end
+  end
+
+  def down do
+    for table <- ~w(workflow_executions step_executions) do
+      execute("""
+      ALTER TABLE durable.#{table} RESET (
+        autovacuum_vacuum_scale_factor,
+        autovacuum_analyze_scale_factor
+      )
+      """)
+    end
+  end
+end
+```
+
+### Watch for long transactions
+
+An open transaction stops vacuum from removing dead rows anywhere in the
+database, and that includes a report or a forgotten console session. With one
+snapshot held across 10,000 runs, `VACUUM` could not remove any of the 90,000
+dead run rows, and an idle claim read 240 pages instead of 4. That was still
+under a millisecond, but it keeps growing until the transaction ends.
+
+```sql
+SELECT pid, now() - xact_start AS open_for, state, left(query, 80) AS query
+FROM pg_stat_activity
+WHERE xact_start < now() - interval '5 minutes'
+ORDER BY xact_start;
+```
+
+Setting `idle_in_transaction_session_timeout` on your database stops a forgotten
+session from doing this.
+
+Your own transactions matter here too, so don't hold one open across a slow call
+inside a step.
+
+### Check how the tables are doing
+
+```sql
+-- Dead rows, and when each table was last vacuumed
+SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
+FROM pg_stat_user_tables
+WHERE schemaname = 'durable'
+ORDER BY n_dead_tup DESC;
+
+-- Size of each table and its indexes
+SELECT c.relname,
+       pg_size_pretty(pg_relation_size(c.oid)) AS heap,
+       pg_size_pretty(pg_indexes_size(c.oid)) AS indexes,
+       pg_size_pretty(pg_total_relation_size(c.oid)) AS total
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'durable' AND c.relkind = 'r'
+ORDER BY pg_total_relation_size(c.oid) DESC;
+```
+
+### Reindex after a big cleanup
+
+Indexes can stay large after their rows are gone. If the second query shows
+indexes far bigger than the table, rebuild the large ones. This doesn't block
+reads or writes:
+
+```sql
+REINDEX INDEX CONCURRENTLY
+  durable.workflow_executions_queue_status_priority_scheduled_at_index;
+```
+
+Avoid `VACUUM FULL` on a live system. It locks the table, so claims stop until it
+finishes.
+
+## Connections
+
+A worker holds a connection only while it runs a query, not for the length of a
+step, so the pool doesn't need to match your concurrency. With a concurrency of
+50 and steps that do nothing, which is the hardest case for the pool:
+
+| `pool_size` | Runs per second | Wait for a connection (p95) |
+|---|---|---|
+| 5 | 114 | 20 ms |
+| 10 | 215 | 7 ms |
+| 20 | 292 | 6 ms |
+| 50 | 400 | 2 ms |
+
+No size caused errors, and a small pool only cost throughput. A reasonable start
+is about a third of your total concurrency, plus what the rest of your app needs,
+since Durable shares your repo's pool with your own queries. Then watch
+`queue_time` in your repo's telemetry.
+
+Durable uses no session features, so it runs on direct connections and behind
+PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
+:unnamed` on your repo.
+
+## Clocks
+
+Nodes compare times that other nodes wrote: how old a lock is, when a sleep or a
+retry is due, when a key's next run may start. So Durable keeps one clock, the
+database's. Each node measures how far its clock is from Postgres's as it starts
+and every 10 seconds, and reads the time with that correction, so nodes whose
+clocks disagree by seconds still agree on all of it. Run NTP on your nodes
+anyway, but a node that's off is no longer a correctness problem. Keep the
+database server's clock right: the whole cluster runs on it.
+
+Two Durable instances in one app, against different database servers, share one
+correction.
+
+## Queues
+
+- **`concurrency` is per node.** `concurrency: 20` on three nodes runs up to 60 at
+  once.
+- **A long step holds a slot, a wait doesn't.** Runs on a sleep, event, input,
+  retry backoff or snooze free their worker.
+- **Keep slow work away from fast work.** Give slow steps their own queue with
+  `queue:` on the step, so an hour of OCR can't hold up a payment.
+- **Poll less once you have a PubSub.** Every queue on every node runs a claim
+  each `poll_interval`, 1 second by default, even when idle. A PubSub wakes pollers
+  when a run starts or resumes, so a longer interval only delays work that comes
+  due later: sleeps, retries, snoozes and delayed starts. A backlog doesn't wait
+  for it either: while there's more to claim, each worker that finishes claims
+  the next run. Between nodes, this needs your cluster connected.
+- **A deep backlog doesn't slow claiming.** A claim took under a millisecond at
+  100 ready runs and at 500,000.
+- **Workers-only and web-only nodes work.** `queue_enabled: false` lets a node
+  start runs without working them.
+- **Pause a queue in an incident** with `Durable.pause_queue(:name)`. It applies
+  on every node until you call `Durable.resume_queue(:name)`. Any name is
+  accepted, so you can pause a queue ahead of the deploy that adds it.
+- **Queue settings are checked at boot.** A queue takes `concurrency` and
+  `poll_interval`, positive integers. Anything else stops Durable from
+  starting.
+
+## Deploys
+
+### Give nodes time to stop
+
+When a node gets `SIGTERM`, Durable stops claiming on every queue. Each run
+finishes the step it's on, then goes back on its queue, and another node carries
+on straight away. The node waits for that for up to `shutdown_grace_period`, 15
+seconds by default.
+
+Keep your platform's shutdown limit longer than that, with a few seconds to
+spare: handing the runs back can take up to 5 seconds more when the database is
+busy. In Kubernetes that's `terminationGracePeriodSeconds`, which is 30 seconds
+by default. List `Durable` after whatever your steps depend on in your
+supervision tree, because children stop in reverse order.
+
+A step still running when the time is up is killed, and its run goes back on its
+queue at once. That step runs again from the start. If a step can run longer than
+the grace period, have it check `shutting_down?/0` and stop early. A snooze
+doesn't use an attempt:
+
+```elixir
+use Durable.Context
+
+step :crawl, fn ctx ->
+  for page <- pages_left(ctx), not shutting_down?(), do: crawl(page)
+
+  if shutting_down?(),
+    do: {:snooze, 0, "node stopping"},
+    else: {:ok, ctx}
+end
+```
+
+With `shutdown_grace_period: 0` the node doesn't wait at all: every run it has
+goes back on its queue at once, and the step each was on runs again.
+
+Runs can change nodes between steps, so don't keep files on local disk from one
+step to the next. Compensations keep running during the wait. A rollback still
+running when the time is up goes back on its queue, and the node that claims it
+finishes it: the undo that was cut short runs again, and the ones that completed
+don't.
+
+To start before the signal arrives, call `Durable.drain()`, for example from a
+Kubernetes `preStop` hook. The grace period counts from the first drain, so the
+stop that follows waits only for what's left of it. For app-wide cleanup of your
+own, use OTP's `prep_stop/1`. Durable reports each drain as
+`[:durable, :node, :drain, :stop]`.
+
+A node that crashes or gets `kill -9` has no warning. Its runs stay locked until
+the lock goes stale, 300 seconds by default, and a sweep that runs every 60 seconds
+puts them back on the queue. You can shorten that with a smaller
+`stale_lock_timeout`, keeping it several times `heartbeat_interval` (Durable warns
+at boot if it's under 3). A worker whose lock was taken over is fenced out, so
+two copies can't both record a result. A worker cut off from the database, which
+can't refresh its lock, stops its step a heartbeat before the lock goes stale, so
+the step doesn't run on beside the copy another node starts.
+
+Smaller failures don't take a queue down. A poll that raises, because the
+database is away for a moment, is logged and tried again at the next tick. A
+queue manager or poller that restarts takes over the workers that are still
+running, so the queue stays within its `concurrency`. `Durable.start/3` works
+while the PubSub is down: the wake is dropped and the next poll finds the run.
+A node that stops in the middle of a rollback hands the run back, and the node
+that claims it undoes what is left.
+
+### Roll out new workflows
+
+A node that doesn't have a workflow's code yet leaves the run for one that does: it goes back on its queue and is tried again every 30 seconds. If no node ever has the code, the run waits until its own `timeout:` or an operator cancels it, and shows up as your oldest ready run. A due schedule gets 15 minutes for a node with the code to fire it. After that each fire counts as a failure, and five in a row disable it.
+
+### Make steps safe to run twice
+
+A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times.
+
+A step that finished is never run again by any of this. That includes a step whose worker died after the step's row was written and before the run saved the result: the run that comes back takes the result from the row, with what the step put in the context and without what it deleted from it. The danger is a step that was in the middle: the worker dies after the payment provider accepted the charge and before Durable recorded the step as done, and the step runs again on another node. So every step with an effect outside your database must be safe to repeat:
+
+```elixir
+step :charge_card, [retry: [max_attempts: 3]], fn trip ->
+  # The same key on every attempt of this step in this run: the provider
+  # charges once and returns the first result to the rest.
+  key = "#{Durable.Context.workflow_id()}:charge_card"
+  {:ok, charge} = Payments.charge(trip["card"], trip["total"], idempotency_key: key)
+  {:ok, assign(trip, :charge_id, charge.id)}
+end
+```
+
+Use the provider's idempotency key for charges, bookings and emails, and upserts rather than inserts for your own tables.
+
+A worker lost between two steps, in a deploy that kills a node before it drains or an out-of-memory kill, costs nothing: the run goes back on its queue and carries on with the next step. Nothing is compensated, because nothing failed. If the same run is lost three times in a row at the same place, it fails so that it can't loop, and you can retry it.
+
+### Upgrade Durable
+
+When a release adds migrations:
+
+```bash
+mix durable.gen.upgrade -r MyApp.Repo
+mix ecto.migrate
+```
+
+Migrate before the new code starts, because a node can fail to boot against an
+older schema. A migration that adds an index blocks inserts on that table while it
+builds. The latest one took under a second on a table of a million runs. `mix durable.migrations -r MyApp.Repo --check` fails when the
+database is behind, so you can put it in a deploy gate. The dashboard's Settings
+page shows the same thing.
+
+#### From 1.x to 2.0
+
+**Nodes on 1.x and nodes on 2.0 must never work the same database at the same
+time.** This is the one upgrade that can't be a rolling deploy. Do it in this
+order:
+
+1. **Run the migration** (`20261122000000`, which adds
+   `workflow_executions.engine_state`) while the 1.x nodes are still up. They
+   carry on as before.
+2. **Stop every node on 1.x**, whether or not it runs queues, and wait until
+   they have all stopped.
+3. **Start the nodes on 2.0.**
+
+2.0 keeps the engine's own state for a run in the new column, out of the run's
+context. 1.x can't read a run that 2.0 has written: it would run a parallel
+lane as a whole workflow, or start a child workflow twice.
+
+Runs in flight carry on after the upgrade. The migration moves the state of
+runs that are over, and every other run is moved the first time a 2.0 node
+loads it. The migration's `down` moves the state back.
+
+Upgrade the dashboard with it: `durable_dashboard` 2.0 needs `durable` 2.0.
+
+Then go through what changed below. The functions that read are the change
+most apps have to make.
+
+##### The functions that read
+
+Every function that reads now returns `{:ok, result}` or `{:error, reason}`,
+and has a twin ending in `!` that returns the result or raises
+`ArgumentError`. Before, most returned the result bare. Add the `!` to keep
+the code you have, or match on the tuple:
+
+```elixir
+# 1.x
+runs = Durable.list_executions(status: :failed)
+children = Durable.list_children(run_id)
+stats = Durable.Stats.overview()
+
+# 2.0
+runs = Durable.list_executions!(status: :failed)
+{:ok, children} = Durable.list_children(run_id)
+{:ok, stats} = Durable.Stats.overview()
+```
+
+That covers `list_executions`, `list_children`, `rollback_plan`,
+`list_schedules`, `list_nodes` and `paused_queues` on `Durable`, everything in
+`Durable.Query` and `Durable.Stats`, `Durable.Activity.list/1`,
+`Durable.Wait.list_pending_inputs/1` and `list_pending_events/1`, and
+`Durable.Scheduler.API.list_schedules/1` and `upcoming_runs/2`. `get_execution/2`, `get_schedule/2`
+and `Durable.Query.get_step_logs/3` already returned a tuple and only gain
+their `!` twin.
+
+Bad input is an error now, where it used to be clamped, ignored or matched
+against nothing:
+
+- A negative `:limit` or `:offset` is `{:error, {:invalid_option, :limit}}`.
+  `list_executions/1` used to read it as 0.
+- A status no run has, alone or in a list, is `{:error, {:invalid_option, :status}}`.
+  So is a status given as text: pass `:failed`, not `"failed"`.
+- A filter of the wrong type is an error instead of being left out: a
+  `:workflow` that isn't a module, a `:from` that isn't a `DateTime`, an
+  `:enabled` that isn't a boolean.
+- Text with a NUL byte, or an id filter that isn't a UUID, is an error instead
+  of matching nothing.
+- `list_children/2`, `rollback_plan/2` and `Durable.Query.get_step_executions/2`
+  return `{:error, :not_found}` for an id that isn't a run. They used to
+  return `[]`.
+- An option the function doesn't know is an error too, so a misspelt filter
+  no longer matches everything:
+  `{:error, {:invalid_option, :statuz}}`.
+- `Durable.Stats.timeline/1` returns `{:ok, buckets}`,
+  `{:error, {:invalid_option, :bucket_seconds}}` for a bucket of 0, and
+  `{:error, {:too_many_buckets, n}}` for a window cut into more than 10,000
+  buckets.
+- `Durable.Scheduler.API.upcoming_runs/2` takes a count from 0 to 1,000.
+  Anything else is `{:error, {:invalid_option, :count}}`.
+
+`Durable.Query.Opts` lists every reason.
+
+##### Your data and the engine's
+
+- **A run's context holds your data only.** `get_execution`, a
+  `call_workflow` result and a lane's result no longer carry keys such as
+  `__fail__` or `__child:…`. Code that read one has nothing to read.
+- **Those names are dropped from your data** wherever it comes in: a start's
+  input, a step's result, `put_context` and `merge_context`, an event's
+  payload, an input's answer. Nothing is raised. A wait under one of them
+  raises `ArgumentError`, and an event or an input sent under one finds no
+  wait.
+- **A whole float stays a float.** `1000.0` used to come back from a save as
+  `1000`.
+
+##### Waits and events
+
+- **A wait that times out returns `timeout_value` exactly as written.**
+  `wait_for_event` and `wait_for_input` used to return the stored copy, so
+  `:auto_rejected` came back as `"auto_rejected"` and a tuple as a list. Match
+  on the atom or the tuple in the step that waits. Once the value is in the
+  context it is JSON again, so a later step sees a string.
+- **`wait_for_any` and `wait_for_all` return a `timeout_value` of `nil` or
+  `false`.** They used to drop it.
+- **An event kept with `buffer: true` reaches `wait_for_any` and
+  `wait_for_all`**, not only `wait_for_event`. `wait_for_any` takes the first
+  of its names that has one.
+- **Only one sender of an event gets `:ok`.** A second `send_event` for the
+  same wait, or one that arrives after the wait timed out, gets
+  `{:error, :not_found}`.
+- **`cancel_wait` goes down to lanes and children.** On a run that waits for a
+  parallel block's lanes or a `call_workflow` child, it cancels the waits
+  under it, and the block or the call keeps waiting for them to finish. It is
+  also `Durable.cancel_wait/2` now.
+- **`:workflow_waiting` is broadcast for every wait**: an event, a group of
+  events and a sleep, as well as an input.
+
+##### Definitions and settings
+
+- **A workflow that can't run doesn't compile.** A `retry:` that isn't a
+  keyword list, a `compensate:` that names nothing and the like are a
+  `CompileError`, and an option that would be ignored is a warning. The
+  [README](../README.md#workflow-options) lists them. Compile your app on 2.0
+  before you deploy it.
+- **Queue settings are checked when Durable starts.** A queue takes
+  `concurrency` and `poll_interval`, both positive integers. Anything else, a
+  misspelt key included, stops the boot with an error that names the queue.
+
+##### Runs
+
+- **A child workflow's own `timeout:` is applied.** It never was, so a child
+  that outlives its `timeout:` now fails.
+- **A parent that times out cancels every child**, the ones started with
+  `start_workflow` included. A run that timed out waiting for its child can be
+  retried: the retry puts the child back to work.
+- **A cancelled lane ends a block that fails fast.** The block used to wait
+  for every other lane first.
+- **A `{:goto, step, data}` can't land inside a branch arm or a lane it isn't
+  in.** The jump is refused and the run fails. A step inside an arm can still
+  jump ahead in its arm or out of the block.
+- **A cancel leaves a run that is queued for rollback alone.** `Durable.cancel`
+  returns `{:error, :already_completed}`, `cancel_all` and a parent's cancel
+  pass over it, and a start with `on_duplicate: :cancel_existing` gets
+  `{:error, {:key_taken, id}}`. The rollback finishes.
+- **A rollback picks up where it stopped.** Asked for again, or resumed on
+  another node, it doesn't repeat the undos that completed.
+- **A step whose result was saved isn't run again.** See
+  [Make steps safe to run twice](#make-steps-safe-to-run-twice).
+- **An attempt gets at most one end event** in telemetry, where the docs said
+  exactly one.
+- **`Durable.pause_queue/2` accepts any queue name**, so a queue can be paused
+  before a node runs it. A misspelt name returns `:ok` and pauses nothing.
+- **`Durable.Testing` helpers fail the assertion** for an id that names no
+  run. They used to raise `BadMapError`.
+
+#### From 2.0.0 to 2.0.1
+
+No migration. One thing changes in workflow
+code: **a workflow's data has string keys in every step, at every depth.**
+Every step, `branch`, `decision`, `into:` function and compensation is handed
+its data as it is stored. Up to 2.0.0 a key a step added as an atom was an
+atom in later steps, and what was inside it could change shape when the run
+was loaded again.
+
+- Read with a string key or a helper: `data.total` becomes `data["total"]` or
+  `get(data, :total)`. `data.total` raises `KeyError`.
+- Match string keys: `fn %{lookups: %{credit: credit}} = data ->` becomes
+  `fn %{"lookups" => %{"credit" => credit}} = data ->`. The same goes for the
+  lanes an `into:` function is given: `%{"credit" => {:ok, credit}}`.
+- Compare a stored value with a string: `data["status"] == "approved"`, not
+  `:approved`. An atom a step returned is stored as its text.
+- Update with a helper or a string key: `assign(data, :total, 1)` sets
+  `data["total"]`. `%{data | total: 1}` raises.
+
+A step can still return a map written with atom keys, and `get_context/1`,
+`put_context/2` and the helpers still take a key as an atom. Runs in flight
+carry on: their stored context always had string keys.
+
+Deploy it as you did 2.0: stop the old nodes, then start the new ones. A 2.0.0
+node that claims a run a 2.0.1 node saved hands its steps string keys too, and
+that node still has the workflow code that reads atoms.
+
+### Change a workflow with runs in flight
+
+A run resumes on whatever code is deployed. New steps after where it stopped are
+picked up. If you rename or remove the step a run stopped at, it fails with
+`definition_changed` and doesn't compensate. Put the step back and call
+`Durable.retry/2`, or keep the old step until those runs have finished.
+
+## What Durable does on its own
+
+| Job | How often | Runs on |
+|---|---|---|
+| Delete finished runs past `prune:` | Hourly | Every node, if `prune:` is set |
+| Put runs with a stale lock back on the queue | Every 60 s | Worker nodes |
+| Time out waits and overdue runs | Every 60 s | Worker nodes |
+| Wake sleeping runs | Every 1 s | Worker nodes |
+| Fire cron schedules | Every 60 s | Worker nodes, one claims each fire |
+| Delete queue samples and activity older than 7 days | With each sample | Every node |
+| Forget nodes unseen for a day | With each heartbeat | Every node |
+| Set its clock to the database's | Every 10 s | Every node |
+
+## Watching it
+
+Every line a step logs has `:workflow`, `:workflow_id`, `:step` and `:attempt` in
+its Logger metadata, so add the ones you want to your formatter's `:metadata`.
+A workflow can add its own with `log_metadata: fn data -> [account_id: data["account_id"]] end`.
+
+When a step ends, Durable saves its lines on the step's row with all their
+metadata, plus `severity_number`, `trace_id` and `span_id` in OpenTelemetry's
+terms. Anything in Logger metadata stays in Postgres until the run is pruned, so
+if yours can hold secrets, narrow it:
+
+```elixir
+config :durable, log_capture: [metadata_filter: [:request_id, :account_id]]
+```
+
+A step that's killed or still running has no saved lines yet, so the console is
+its live copy. To keep the lines a step saves off the default Logger handler
+anyway, set `config :durable, log_capture: [console: false]`.
+
+A plain `Task` inside a step starts with none of this. Wrap its function in
+`Durable.Context.bind/1` to keep the Logger metadata and have its lines saved.
+
+To see runs as traces, add the OpenTelemetry SDK and follow `Durable.OpenTelemetry`.
+Each step attempt becomes a span, and a run and everything under it are one trace,
+across sleeps, retries and nodes.
+
+Each step attempt sends at most one end event, from whichever node closed it. A
+worker killed between closing its row and leaving the span sends none, so count
+attempts from the step rows when the number has to be exact.
+
+Add `Durable.Telemetry.metrics/0` to your reporter:
+
+```elixir
+def metrics, do: my_metrics() ++ Durable.Telemetry.metrics()
+```
+
+These are the ones worth an alert:
+
+| Watch | Where | Means |
+|---|---|---|
+| Oldest ready run | `oldest_ready_at` from `Durable.Stats.queues/1` | Work is waiting longer than it should: add capacity, or look for a stuck queue |
+| Ready backlog | `ready` from `Durable.Stats.queues/1` | You're not keeping up with what's being started |
+| Failed runs | `durable.workflow.stop.count`, `status: :failed` | The usual signal, per workflow |
+| Recovered runs | `durable.queue.stale_recovered.count` | A node crashed or was killed without warning |
+| Fenced workers | `durable.queue.worker_fenced.count` | A run was taken over while its worker was still going, usually because heartbeats weren't getting through |
+| Failed acks | `[:durable, :queue, :ack_failed]` event | A finished job couldn't be released after retries |
+| Turned-off schedules | `schedule_disabled` in `Durable.Activity.list/1` | A cron schedule kept failing and stopped firing |
+| Dead rows | The SQL above | Vacuum isn't keeping up, or a long transaction is blocking it |
+
+The [dashboard](https://durable.wavezync.com/docs/using-the-dashboard/) shows most
+of this on its Queues & nodes page, with recoveries and fenced workers listed for
+the last day.
+
+`mix durable.doctor` reports stuck state: waiting runs nothing can wake, stale
+locks, stalled compensations and schedules that were turned off. `--fix` runs the
+same recovery as the background sweep. `mix durable.status` gives a quick summary.
+Mix tasks aren't available inside a release, so run these from somewhere that has
+Mix and can reach the database, such as a CI job.
+
+## Housekeeping
+
+| When | Do |
+|---|---|
+| Before each deploy | `mix durable.migrations --check` |
+| On each Durable upgrade | `mix durable.gen.upgrade`, then `mix ecto.migrate` |
+| Weekly | Look at dead rows, table sizes and failed runs that nobody has handled |
+| Monthly | Check retention still fits: disk growth against what you keep |
+| After changing retention | Check index sizes, and reindex if they're far bigger than the tables |
+| In an incident | `mix durable.doctor`, then the Queues & nodes page |

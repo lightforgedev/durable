@@ -1,0 +1,336 @@
+defmodule Durable.DSL.Workflow do
+  @moduledoc """
+  Provides the `workflow` macro for defining durable workflows.
+
+  ## Usage
+
+      defmodule MyApp.OrderWorkflow do
+        use Durable
+
+        workflow "process_order", timeout: hours(2) do
+          step :validate, fn order ->
+            {:ok, Map.put(order, "order_id", order["id"])}
+          end
+
+          step :charge, [retry: [max_attempts: 3]], fn order ->
+            {:ok, Map.put(order, "receipt", Payments.charge(order["total"]))}
+          end
+        end
+      end
+
+  A workflow's name is a non-empty string written in place, and is used once
+  in a module: anything else is a compile error.
+
+  ## Options
+
+  - `:timeout` - How long a run may take, in milliseconds, from when it is due
+    to start — waits and sleeps included. A run past it fails with a
+    `"timeout"` error, like any failure (see `:on_failure`): a step still
+    running is stopped (and not retried), and a waiting run is woken to fail.
+    Steps in a run with a timeout run in their own process; see the step
+    `:timeout` option. `0`, a negative number or `:infinity` means no timeout
+    and compiles with a warning; anything else that isn't a positive integer
+    is a compile error.
+  - `:on_failure` - What a run does when it fails for good. `:halt` (default)
+    leaves it failed with nothing undone, so `Durable.retry/2` can carry it on
+    once the cause is fixed, or `Durable.rollback/2` can undo it. `:rollback`
+    runs the `compensate:` of every completed step at once; a run rolled back
+    can't be retried. `[rollback_after: ms]` halts, and rolls the run back if
+    nobody has retried it or rolled it back by then: for a run holding
+    something that lapses, such as a card authorization. Whichever is set, a
+    step that returns `{:rollback, reason}` rolls the run back
+  - `:queue` - The queue runs start on unless `Durable.start/3` names one. A
+    step's own `:queue` moves the run for that step
+  - `:reuse` - When a start with a `key:` may run again after the run holding
+    that key has finished: `:after_close` (default, after any finish),
+    `:after_failure` (only after it failed, was cancelled or rolled back; a
+    completed run keeps its key) or `:never`. See the Workflow keys guide.
+  - `:on_duplicate` - What `Durable.start/3` does when the key is taken,
+    unless the call says otherwise: `:use_existing` (default, `{:ok, holder_id}`),
+    `:error` (`{:error, {:key_taken, holder_id}}`), `:cancel_existing` (replace
+    the running holder with a new run), `:run_again` (run once more after the
+    holder ends, with the newest input) or `{:send_event, name}` (send the new
+    input to the running holder as an event)
+  - `:key_scope` - A name workflows share their keys under: a run of one
+    waits for a run of another with the same key, in the order they were
+    started. Without it, a workflow's keys are its own. Needs
+    `reuse: :after_close`. See the Workflow keys guide
+  - `:debounce` - `[period: ms, timeout: ms]`: a start with a `key:` waits
+    `period` before it runs, and each start with the same key in that time
+    gives it the newer input and restarts the wait, up to `timeout` after the
+    first start. `timeout` is optional
+  - `:log_metadata` - A function of a step's data returning a keyword list, set
+    as `Logger.metadata/1` before every attempt, on top of the `:workflow`,
+    `:workflow_id`, `:step` and `:attempt` Durable always sets:
+    `log_metadata: fn data -> [account_id: data["account_id"]] end`
+
+  """
+
+  alias Durable.DSL.Step
+  alias Durable.Scheduler.DSL, as: SchedulerDSL
+
+  @doc """
+  Defines a workflow with the given name and options.
+  """
+  defmacro workflow(name, opts \\ [], do: block) do
+    validate_name!(name, __CALLER__)
+    validate_workflow_opts!(opts, name)
+    # Read by the step macros as they expand, to tell this workflow's steps
+    # from another's in the same module.
+    Module.put_attribute(__CALLER__.module, :__durable_workflow__, name)
+
+    # Generate unique function names for this workflow
+    definition_fn = :"__workflow_def_#{name}__"
+    steps_fn = :"__workflow_steps_#{name}__"
+    compensations_fn = :"__workflow_compensations_#{name}__"
+
+    quote do
+      Durable.DSL.Workflow.__unique_name__(@durable_workflows, unquote(name), __ENV__)
+
+      Durable.DSL.Workflow.__timeout__(
+        Keyword.get(unquote(opts), :timeout),
+        unquote(name),
+        __ENV__
+      )
+
+      # Reset current steps accumulator
+      Module.delete_attribute(__MODULE__, :durable_current_steps)
+      Module.register_attribute(__MODULE__, :durable_current_steps, accumulate: true)
+
+      # Reset compensations accumulator
+      Module.delete_attribute(__MODULE__, :durable_compensations)
+      Module.register_attribute(__MODULE__, :durable_compensations, accumulate: true)
+
+      # Execute the block to collect steps and compensations
+      unquote(block)
+
+      # Get collected steps (in reverse order due to accumulation)
+      # Store in module attribute for use in the steps function
+      @durable_collected_steps_list Module.get_attribute(__MODULE__, :durable_current_steps)
+                                    |> Enum.reverse()
+
+      Durable.DSL.Workflow.unique_step_names!(
+        @durable_collected_steps_list,
+        unquote(name),
+        __ENV__
+      )
+
+      # Get collected compensations
+      @durable_collected_comps_list Module.get_attribute(__MODULE__, :durable_compensations)
+
+      Step.__check__(
+        @durable_collected_steps_list,
+        @durable_collected_comps_list,
+        unquote(name),
+        __ENV__
+      )
+
+      # Define a function that returns the steps list
+      # The steps contain function references like &Module.func/1 which are valid at runtime
+      @doc false
+      def unquote(steps_fn)() do
+        @durable_collected_steps_list
+      end
+
+      # Define a function that returns the compensations map
+      @doc false
+      def unquote(compensations_fn)() do
+        Map.new(@durable_collected_comps_list, &{&1.name, &1})
+      end
+
+      # Define a function that returns this workflow's definition
+      @doc false
+      def unquote(definition_fn)() do
+        %Durable.Definition.Workflow{
+          name: unquote(name),
+          module: __MODULE__,
+          steps: unquote(steps_fn)(),
+          compensations: unquote(compensations_fn)(),
+          # Evaluated here, in the workflow module, so `timeout: hours(2)` is
+          # a number rather than the quoted call.
+          opts: Map.new(unquote(opts))
+        }
+      end
+
+      Durable.DSL.Workflow.__on_failure__(Keyword.get(unquote(opts), :on_failure), unquote(name))
+
+      # Register just the workflow name and function reference
+      @durable_workflows {unquote(name), unquote(definition_fn)}
+
+      # Capture any @schedule attribute for this workflow
+      if Code.ensure_loaded?(Durable.Scheduler.DSL) do
+        SchedulerDSL.capture_schedule(__MODULE__, unquote(name))
+      end
+    end
+  end
+
+  @doc false
+  # A step is found by its name: on resume, for a goto, for its attempts. Two
+  # with one name would share all of that. Checked on the steps the block
+  # produced, not as each `step` expands: only one arm of a compile-time `if`
+  # is ever a step.
+  def unique_step_names!(steps, workflow, env) do
+    names = Enum.map(steps, & &1.name)
+
+    case names -- Enum.uniq(names) do
+      [] ->
+        :ok
+
+      [name | _] ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "step #{inspect(name)} is defined twice in workflow #{inspect(workflow)}; " <>
+              "step names must be unique within a workflow"
+    end
+  end
+
+  # The name is part of function names and is stored with every run, so it is
+  # written in place: a variable or an attribute isn't known when this expands.
+  defp validate_name!(name, _caller) when is_binary(name) and name != "", do: :ok
+
+  defp validate_name!(name, caller) do
+    raise CompileError,
+      file: caller.file,
+      line: caller.line,
+      description:
+        "a workflow's name must be a non-empty string written in place, as in " <>
+          "`workflow \"process_order\" do`, got: #{Macro.to_string(name)}"
+  end
+
+  @doc false
+  # The second of two workflows with one name could never be started.
+  def __unique_name__(defined, name, env) do
+    if List.keymember?(defined, name, 0) do
+      raise CompileError,
+        file: env.file,
+        line: env.line,
+        description: "workflow #{inspect(name)} is defined twice in #{inspect(env.module)}"
+    end
+  end
+
+  @doc false
+  # Checked in the workflow module, where `timeout: hours(2)` is a number. A
+  # value that can only be a mistake is refused. One that reads as "no limit"
+  # runs as that, and says so.
+  def __timeout__(nil, _name, _env), do: :ok
+  def __timeout__(ms, _name, _env) when is_integer(ms) and ms > 0, do: :ok
+
+  def __timeout__(timeout, name, env) when is_integer(timeout) or timeout == :infinity do
+    IO.warn(
+      "workflow #{inspect(name)} has timeout: #{inspect(timeout)}, which means no timeout. " <>
+        "Leave timeout: out to say that, or give it milliseconds, as in timeout: hours(2)",
+      env
+    )
+  end
+
+  def __timeout__(timeout, name, env) do
+    raise CompileError,
+      file: env.file,
+      line: env.line,
+      description:
+        "workflow #{inspect(name)} has timeout: #{inspect(timeout)}. " <>
+          "It takes milliseconds, as in timeout: hours(2)"
+  end
+
+  @workflow_opts [
+    :timeout,
+    :on_failure,
+    :queue,
+    :reuse,
+    :on_duplicate,
+    :key_scope,
+    :debounce,
+    :log_metadata
+  ]
+
+  # Literal values are checked here; anything computed is checked when a run starts.
+  @allowed_values %{
+    on_failure: [:halt, :rollback],
+    reuse: [:after_close, :after_failure, :never],
+    on_duplicate: [:use_existing, :error, :cancel_existing, :run_again]
+  }
+
+  @doc false
+  # Checked in the workflow module, where `rollback_after: days(5)` is a number.
+  def __on_failure__(on_failure, _name) when on_failure in [nil, :halt, :rollback], do: :ok
+
+  def __on_failure__([rollback_after: ms], _name) when is_integer(ms) and ms > 0, do: :ok
+
+  def __on_failure__(on_failure, name) do
+    raise ArgumentError,
+          "invalid on_failure: #{inspect(on_failure)} for workflow #{inspect(name)}; expected " <>
+            ":halt, :rollback or [rollback_after: ms], as in [rollback_after: days(5)]"
+  end
+
+  defp validate_workflow_opts!(opts, name) when is_list(opts) do
+    case Keyword.keys(opts) -- @workflow_opts do
+      [] ->
+        Enum.each(@allowed_values, fn {key, allowed} ->
+          validate_value!(opts, key, allowed, name)
+        end)
+
+        validate_debounce!(Keyword.get(opts, :debounce), name)
+        validate_key_scope!(opts, name)
+
+        if opts[:on_duplicate] == :run_again and opts[:reuse] == :never do
+          raise ArgumentError,
+                "on_duplicate: :run_again can't run again with reuse: :never " <>
+                  "for workflow #{inspect(name)}: no run after the first may take the key"
+        end
+
+      unknown ->
+        raise ArgumentError,
+              "unknown option(s) #{inspect(unknown)} for workflow #{inspect(name)}; " <>
+                "supported: #{inspect(@workflow_opts)}"
+    end
+  end
+
+  defp validate_workflow_opts!(_opts, _name), do: :ok
+
+  # A literal keyword list can be checked here; its values (`seconds(30)`) are
+  # evaluated, and checked, when a run starts.
+  defp validate_debounce!(debounce, name) when is_list(debounce) do
+    keys = Enum.map(debounce, fn {k, _} -> k end)
+
+    if :period not in keys or keys -- [:period, :timeout] != [] do
+      raise ArgumentError,
+            "invalid debounce: for workflow #{inspect(name)}; expected " <>
+              "[period: ms] or [period: ms, timeout: ms]"
+    end
+  end
+
+  defp validate_debounce!(_debounce, _name), do: :ok
+
+  # A literal is checked here; anything computed is checked when a run starts.
+  defp validate_key_scope!(opts, name) do
+    scope = Keyword.get(opts, :key_scope)
+
+    cond do
+      is_nil(scope) ->
+        :ok
+
+      scope == "" or is_atom(scope) or is_number(scope) ->
+        raise ArgumentError,
+              "invalid key_scope: #{inspect(scope)} for workflow #{inspect(name)}; " <>
+                ~s|expected a non-empty string, as in key_scope: "account_index"|
+
+      is_atom(opts[:reuse]) and opts[:reuse] not in [nil, :after_close] ->
+        raise ArgumentError, Durable.Keys.scope_reuse_message(name)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_value!(opts, key, allowed, name) do
+    value = Keyword.get(opts, key)
+
+    if is_atom(value) and not is_nil(value) and value not in allowed do
+      raise ArgumentError,
+            "invalid #{key}: #{inspect(value)} for workflow #{inspect(name)}; " <>
+              "expected one of #{inspect(allowed)}"
+    end
+  end
+end

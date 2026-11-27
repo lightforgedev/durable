@@ -1,0 +1,128 @@
+defmodule Durable.Executor.Backoff do
+  @moduledoc """
+  Backoff strategies for step retry logic.
+
+  Supports three backoff strategies:
+  - `:exponential` - Delay grows exponentially (2^attempt * base)
+  - `:linear` - Delay grows linearly (attempt * base)
+  - `:constant` - Fixed delay between retries
+
+  All delays are in milliseconds and capped at a configurable maximum.
+  """
+
+  @type strategy :: :exponential | :linear | :constant
+
+  @type opts :: %{
+          optional(:base) => pos_integer(),
+          optional(:max_backoff) => pos_integer()
+        }
+
+  @default_base 1_000
+  # A step's retry parks the run instead of blocking the worker, so a long
+  # backoff costs nothing. Compensations still retry in-process: they pass a
+  # lower cap (see CompensationRunner).
+  @default_max_backoff 3_600_000
+
+  @doc """
+  Calculates the delay before the next retry attempt.
+
+  ## Arguments
+
+  - `strategy` - The backoff strategy to use
+  - `attempt` - The current attempt number (1-based)
+  - `opts` - Options for the backoff calculation
+
+  ## Options
+
+  - `:base` - Base delay in milliseconds (default: 1000)
+  - `:max_backoff` - Maximum delay in milliseconds (default: 3_600_000 = 1 hour)
+
+  ## Examples
+
+      iex> Backoff.calculate(:exponential, 1, %{base: 1000})
+      2000
+
+      iex> Backoff.calculate(:exponential, 3, %{base: 1000})
+      8000
+
+      iex> Backoff.calculate(:linear, 3, %{base: 1000})
+      3000
+
+      iex> Backoff.calculate(:constant, 5, %{base: 1000})
+      1000
+
+  """
+  @spec calculate(strategy(), pos_integer(), opts()) :: pos_integer()
+  def calculate(strategy, attempt, opts \\ %{})
+
+  def calculate(:exponential, attempt, opts) do
+    base = Map.get(opts, :base, @default_base)
+    max = Map.get(opts, :max_backoff, @default_max_backoff)
+
+    delay = trunc(:math.pow(2, attempt) * base)
+    min(delay, max)
+  end
+
+  def calculate(:linear, attempt, opts) do
+    base = Map.get(opts, :base, @default_base)
+    max = Map.get(opts, :max_backoff, @default_max_backoff)
+
+    delay = attempt * base
+    min(delay, max)
+  end
+
+  def calculate(:constant, _attempt, opts) do
+    Map.get(opts, :base, @default_base)
+  end
+
+  @doc """
+  Calculates delay with jitter to avoid thundering herd.
+
+  Adds random jitter of ±25% to the calculated delay.
+
+  ## Examples
+
+      # Delay will be between 1500 and 2500 for exponential with attempt=1
+      Backoff.calculate_with_jitter(:exponential, 1, %{base: 1000})
+
+  """
+  @spec calculate_with_jitter(strategy(), pos_integer(), opts()) :: non_neg_integer()
+  def calculate_with_jitter(strategy, attempt, opts \\ %{}) do
+    base_delay = calculate(strategy, attempt, opts)
+    jitter_range = trunc(base_delay * 0.25)
+
+    # `:rand.uniform/1` requires a positive argument. For small delays (a base
+    # under ~4 ms, e.g. fast test retries) `jitter_range` truncates to 0 and
+    # `:rand.uniform(0)` would crash the worker mid-retry. Skip jitter when
+    # there's no meaningful range to jitter over.
+    if jitter_range <= 0 do
+      base_delay
+    else
+      jitter = :rand.uniform(jitter_range * 2) - jitter_range
+      max(0, base_delay + jitter)
+    end
+  end
+
+  @doc """
+  Sleeps for the calculated backoff duration.
+
+  ## Examples
+
+      Backoff.sleep(:exponential, 2, %{base: 1000})
+
+  """
+  @spec sleep(strategy(), pos_integer(), opts()) :: :ok
+  def sleep(strategy, attempt, opts \\ %{}) do
+    strategy
+    |> calculate_with_jitter(attempt, opts)
+    |> pause()
+  end
+
+  @doc false
+  # `Durable.Testing.drain/2` sets `:durable_skip_backoff` so retries don't slow tests.
+  @spec pause(non_neg_integer()) :: :ok
+  def pause(ms) do
+    unless Process.get(:durable_skip_backoff), do: Process.sleep(ms)
+    :ok
+  end
+end

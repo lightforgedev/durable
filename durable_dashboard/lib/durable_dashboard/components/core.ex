@@ -1,0 +1,1479 @@
+defmodule DurableDashboard.Components.Core do
+  @moduledoc """
+  Stateless function components used across the dashboard.
+
+  Stateful pieces (filter bars, paginated tables, palettes) live as
+  `Phoenix.LiveComponent` modules elsewhere. Anything visual, parameterized,
+  and stateless lives here so it can be composed without `:id` ceremony.
+  """
+
+  use Phoenix.Component
+
+  alias DurableDashboard.Trace
+  alias Phoenix.LiveView.JS
+
+  # ============================================================================
+  # Icon
+  # ============================================================================
+
+  @doc """
+  Renders an inline SVG icon. The available set is curated; add new icons by
+  extending the `~H` clause below with a new pattern match.
+
+  ## Examples
+
+      <.icon name="check" />
+      <.icon name="x-mark" class="size-5" />
+  """
+  attr :name, :string, required: true
+  attr :class, :any, default: "size-4"
+  attr :rest, :global
+
+  def icon(%{name: "check"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "x-mark"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "chevron-right"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "chevron-left"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 0 1-.02 1.06L8.832 10l3.938 3.71a.75.75 0 1 1-1.04 1.08l-4.5-4.25a.75.75 0 0 1 0-1.08l4.5-4.25a.75.75 0 0 1 1.06.02Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "chevron-down"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "search"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 3.405 9.83l3.382 3.382a.75.75 0 0 0 1.06-1.06l-3.382-3.382A5.5 5.5 0 0 0 9 3.5ZM5 9a4 4 0 1 1 8 0 4 4 0 0 1-8 0Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "exclamation-triangle"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495ZM10 5a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 5Zm0 9a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "information-circle"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-7-4a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM9 9a.75.75 0 0 0 0 1.5h.253a.25.25 0 0 1 .244.304l-.459 2.066A1.75 1.75 0 0 0 10.747 15H11a.75.75 0 0 0 0-1.5h-.253a.25.25 0 0 1-.244-.304l.459-2.066A1.75 1.75 0 0 0 9.253 9H9Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "home"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M9.293 2.293a1 1 0 0 1 1.414 0l7 7A1 1 0 0 1 17 11h-1v6a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1v-3a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6H3a1 1 0 0 1-.707-1.707l7-7Z" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "queue"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 10a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm0 5.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "clock"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "calendar"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M5.75 2a.75.75 0 0 1 .75.75V4h7V2.75a.75.75 0 0 1 1.5 0V4h.25A2.75 2.75 0 0 1 18 6.75v8.5A2.75 2.75 0 0 1 15.25 18H4.75A2.75 2.75 0 0 1 2 15.25v-8.5A2.75 2.75 0 0 1 4.75 4H5V2.75A.75.75 0 0 1 5.75 2Zm-1 5.5c-.69 0-1.25.56-1.25 1.25v6.5c0 .69.56 1.25 1.25 1.25h10.5c.69 0 1.25-.56 1.25-1.25v-6.5c0-.69-.56-1.25-1.25-1.25H4.75Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "inbox"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M4.5 2.75a.75.75 0 0 0-.75.75v6h2.585a1.5 1.5 0 0 1 1.06.44l1.93 1.93a1.5 1.5 0 0 0 1.06.44h.83a1.5 1.5 0 0 0 1.06-.44l1.93-1.93a1.5 1.5 0 0 1 1.06-.44h2.585v-6a.75.75 0 0 0-.75-.75H4.5Z" />
+      <path d="M3.75 11h2.585a.5.5 0 0 1 .353.146l1.93 1.93a2.5 2.5 0 0 0 1.768.732h.828a2.5 2.5 0 0 0 1.768-.732l1.93-1.93a.5.5 0 0 1 .353-.146h2.585a.75.75 0 0 1 0 1.5h-2.585a2 2 0 0 0-1.414.586l-1.93 1.93a4 4 0 0 1-2.829 1.172H10.207a4 4 0 0 1-2.829-1.172l-1.93-1.93A2 2 0 0 0 4.034 12.5H3.75a.75.75 0 0 1 0-1.5Z" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "settings"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.992 6.992 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "ellipsis-horizontal"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M3 10a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0ZM8.5 10a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0ZM15.5 8.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "arrow-path"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H3.989a.75.75 0 0 0-.75.75v4.242a.75.75 0 0 0 1.5 0v-2.43l.31.31a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39ZM3.144 6.39a5.5 5.5 0 0 1 9.201-2.466l.314.31H10.23a.75.75 0 0 0 0 1.5h4.243a.75.75 0 0 0 .75-.75V.74a.75.75 0 0 0-1.5 0v2.43l-.31-.31A7 7 0 0 0 1.7 6.002a.75.75 0 1 0 1.448.388Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "play"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M2 10a8 8 0 1 1 16 0 8 8 0 0 1-16 0Zm6.39-2.908a.75.75 0 0 1 .766.027l3.5 2.25a.75.75 0 0 1 0 1.262l-3.5 2.25A.75.75 0 0 1 8 12.25v-4.5a.75.75 0 0 1 .39-.658Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "pause"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M2 10a8 8 0 1 1 16 0 8 8 0 0 1-16 0Zm5-2.25A.75.75 0 0 1 7.75 7h.5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-.75.75h-.5A.75.75 0 0 1 7 12.25v-4.5Zm4.25-.75a.75.75 0 0 0-.75.75v4.5c0 .414.336.75.75.75h.5a.75.75 0 0 0 .75-.75v-4.5a.75.75 0 0 0-.75-.75h-.5Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "moon"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path fill-rule="evenodd" d="M7.455 2.004a.75.75 0 0 1 .26.77 7 7 0 0 0 9.81 7.51.75.75 0 0 1 1.075.953 8.5 8.5 0 1 1-11.527-9.831.75.75 0 0 1 .382.598Z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "sun"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M10 2a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 2ZM10 15a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 15ZM10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM15.657 5.404a.75.75 0 1 0-1.06-1.06l-1.061 1.06a.75.75 0 0 0 1.06 1.06l1.06-1.06ZM6.464 14.596a.75.75 0 1 0-1.06-1.06l-1.06 1.06a.75.75 0 0 0 1.06 1.06l1.06-1.06ZM18 10a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 18 10ZM5 10a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 5 10ZM14.596 15.657a.75.75 0 0 0 1.06-1.06l-1.06-1.061a.75.75 0 1 0-1.06 1.06l1.06 1.06ZM5.404 6.464a.75.75 0 0 0 1.06-1.06l-1.06-1.06a.75.75 0 1 0-1.061 1.06l1.06 1.06Z" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "command"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" class={@class} {@rest}>
+      <path d="M6 6V4.5a2 2 0 1 1 2 2H6Zm0 0v8m0 0v1.5a2 2 0 1 1-2-2H6Zm0 0h8m0 0v1.5a2 2 0 1 0 2-2h-2Zm0 0V6m0 0V4.5a2 2 0 1 0-2 2h2Z" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "github"} = assigns) do
+    # Brand mark — solid octocat. Native 24×24 viewBox; scales to `size-4`
+    # like the heroicons-mini set (viewBox sizes the coordinate space, not
+    # the render size).
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class={@class} {@rest}>
+      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "clipboard"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5a1.5 1.5 0 0 1-1.5 1.5h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.379 4.5H7v-1Z" />
+      <path d="M4.5 6A1.5 1.5 0 0 0 3 7.5v9A1.5 1.5 0 0 0 4.5 18h7a1.5 1.5 0 0 0 1.5-1.5v-5.879a1.5 1.5 0 0 0-.44-1.06L9.44 6.439A1.5 1.5 0 0 0 8.378 6H4.5Z" />
+    </svg>
+    """
+  end
+
+  # The Durable logo, as on durable.wavezync.com (site/public/favicon.svg):
+  # a step done, the wait, the next step. Its own colours, in both themes.
+  def icon(%{name: "mark"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 26" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 8H13" stroke="#8390ab" stroke-width="2.4" stroke-linecap="round" /><path d="M13 8C17 8 17 18 21 18H23" fill="none" stroke="#6997fc" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="2 3" /><circle cx="13" cy="8" r="4" fill="#f2785b" /><circle cx="22" cy="18" r="4" fill="#2bb3a3" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-overview"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-runs"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-workflows"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M6 8.5V12a4 4 0 0 0 4 4h5.5" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-inbox"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 13l3-8h12l3 8v6H3z" /><path d="M3 13h5l1.5 2.5h5L16 13h5" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-keys"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="8" cy="15" r="4" /><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-queues"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13l9 5 9-5" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-schedules"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-telemetry"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="12" cy="12" r="2" /><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "nav-settings"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1" /><circle cx="15" cy="6" r="2" /><circle cx="9" cy="12" r="2" /><circle cx="17" cy="18" r="2" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: name} = assigns) when is_binary(name) do
+    # Unknown icon — render a placeholder square so it's visible during dev.
+    ~H"""
+    <span
+      role="img"
+      aria-label={"icon: " <> @name}
+      data-tip={"missing icon: " <> @name}
+      class={[@class, "inline-block bg-destructive/30 rounded-sm"]}
+      {@rest}
+    >
+    </span>
+    """
+  end
+
+  # ============================================================================
+  # Button
+  # ============================================================================
+
+  @doc """
+  A button with kind variants.
+
+  ## Examples
+
+      <.button>Default</.button>
+      <.button kind="primary" type="submit">Save</.button>
+      <.button kind="ghost" phx-click="cancel">Cancel</.button>
+  """
+  attr :kind, :string,
+    default: "secondary",
+    values: ~w(primary secondary ghost destructive link)
+
+  attr :size, :string, default: "md", values: ~w(sm md lg)
+  attr :type, :string, default: "button"
+  attr :class, :string, default: nil
+
+  attr :rest, :global,
+    include: ~w(disabled form name value phx-click phx-target phx-value-id href patch navigate)
+
+  slot :inner_block, required: true
+
+  def button(assigns) do
+    if navigation_attrs?(assigns.rest) do
+      ~H"""
+      <.link class={[button_class(@kind, @size), @class]} {@rest}>
+        {render_slot(@inner_block)}
+      </.link>
+      """
+    else
+      ~H"""
+      <button type={@type} class={[button_class(@kind, @size), @class]} {@rest}>
+        {render_slot(@inner_block)}
+      </button>
+      """
+    end
+  end
+
+  defp navigation_attrs?(rest) when is_map(rest) do
+    Map.has_key?(rest, :href) or Map.has_key?(rest, :patch) or Map.has_key?(rest, :navigate)
+  end
+
+  defp navigation_attrs?(_), do: false
+
+  defp button_class(kind, size) do
+    base =
+      "inline-flex items-center justify-center gap-1.5 rounded-md font-medium " <>
+        "transition-colors disabled:opacity-50 disabled:pointer-events-none " <>
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 " <>
+        "focus-visible:ring-offset-background"
+
+    size_class =
+      case size do
+        "sm" -> " h-[26px] px-2.5 text-xs"
+        "md" -> " h-[30px] px-3 text-[13px]"
+        "lg" -> " h-10 px-4 text-sm"
+      end
+
+    kind_class =
+      case kind do
+        "primary" ->
+          " bg-foreground text-background hover:bg-foreground/90"
+
+        "secondary" ->
+          " bg-card text-foreground border border-input hover:bg-accent"
+
+        "ghost" ->
+          " text-foreground hover:bg-accent hover:text-accent-foreground"
+
+        "destructive" ->
+          " bg-card text-destructive border border-input hover:bg-destructive/10"
+
+        "link" ->
+          " text-primary underline-offset-4 hover:underline"
+      end
+
+    base <> size_class <> kind_class
+  end
+
+  # ============================================================================
+  # Icon button — square, icon-only
+  # ============================================================================
+
+  @doc """
+  A square button containing only an icon. For toolbar-style controls
+  (theme toggle, pagination chevrons, sheet-close, table actions).
+
+  Variants: `default` (bordered card surface) | `ghost` (no border, hover
+  bg only). Sizes: `sm` (28h) | `md` (32h).
+
+  See `DESIGN.md` §5 (component primitives) and §8 (density).
+
+  ## Examples
+
+      <.icon_button icon="x-mark" aria-label="Close" phx-click="close" />
+      <.icon_button kind="ghost" size="sm" icon="chevron-right" aria-label="Next" />
+  """
+  attr :icon, :string, required: true
+  attr :kind, :string, default: "default", values: ~w(default ghost)
+  attr :size, :string, default: "md", values: ~w(sm md)
+  attr :type, :string, default: "button"
+  attr :class, :string, default: nil
+
+  attr :rest, :global,
+    include: ~w(disabled form name value phx-click phx-target phx-value-id aria-label)
+
+  def icon_button(assigns) do
+    ~H"""
+    <button type={@type} class={[icon_button_class(@kind, @size), @class]} {@rest}>
+      <.icon name={@icon} class={icon_button_icon_class(@size)} />
+    </button>
+    """
+  end
+
+  defp icon_button_class(kind, size) do
+    base =
+      "inline-flex items-center justify-center rounded-md " <>
+        "transition-colors disabled:opacity-40 disabled:pointer-events-none " <>
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+
+    size_class =
+      case size do
+        "sm" -> " size-7"
+        "md" -> " size-8"
+      end
+
+    kind_class =
+      case kind do
+        "default" ->
+          " border border-border bg-card/40 text-muted-foreground " <>
+            "hover:bg-accent hover:text-accent-foreground"
+
+        "ghost" ->
+          " text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      end
+
+    base <> size_class <> kind_class
+  end
+
+  defp icon_button_icon_class("sm"), do: "size-3.5"
+  defp icon_button_icon_class("md"), do: "size-4"
+
+  # ============================================================================
+  # Keyboard hint
+  # ============================================================================
+
+  @doc """
+  Renders a keyboard shortcut hint.
+
+  ## Examples
+
+      <.kbd>⌘K</.kbd>
+      <.kbd>Esc</.kbd>
+  """
+  attr :class, :string, default: nil
+  slot :inner_block, required: true
+
+  def kbd(assigns) do
+    ~H"""
+    <kbd class={[
+      "inline-flex items-center justify-center min-w-[20px] h-5 px-1.5",
+      "rounded-sm border border-border bg-muted text-muted-foreground",
+      "font-mono text-[11px] tracking-wide",
+      @class
+    ]}>
+      {render_slot(@inner_block)}
+    </kbd>
+    """
+  end
+
+  # ============================================================================
+  # Badge
+  # ============================================================================
+
+  @doc """
+  A small label tag.
+
+  ## Examples
+
+      <.badge>default</.badge>
+      <.badge kind="success">running</.badge>
+  """
+  attr :kind, :string,
+    default: "default",
+    values: ~w(default primary success warning destructive info muted)
+
+  attr :class, :string, default: nil
+  slot :inner_block, required: true
+
+  def badge(assigns) do
+    ~H"""
+    <span class={[badge_class(@kind), @class]}>
+      {render_slot(@inner_block)}
+    </span>
+    """
+  end
+
+  defp badge_class(kind) do
+    base =
+      "inline-flex items-center rounded-[5px] px-1.5 h-5 text-[11px] font-medium " <>
+        "whitespace-nowrap"
+
+    case kind do
+      "default" -> base <> " bg-secondary text-secondary-foreground"
+      "primary" -> base <> " bg-primary/15 text-primary"
+      "success" -> base <> " bg-success/15 text-success"
+      "warning" -> base <> " bg-warning/15 text-warning"
+      "destructive" -> base <> " bg-destructive/15 text-destructive"
+      "info" -> base <> " bg-info/15 text-info"
+      "muted" -> base <> " bg-muted text-muted-foreground"
+    end
+  end
+
+  # ============================================================================
+  # Status pill
+  # ============================================================================
+
+  @doc """
+  A status pill for workflow / step states. Uses semantic colors and an LED
+  pulse for active states.
+
+  ## Examples
+
+      <.status_pill status={:running} />
+      <.status_pill status="completed" />
+      <.status_pill status={:idle} label="Off" />
+  """
+  attr :status, :any, required: true
+
+  attr :label, :string,
+    default: nil,
+    doc: "overrides the status's own wording; shape and tone stay"
+
+  attr :tip, :any,
+    default: nil,
+    doc: "the tooltip: what the status means (`status_help/1`) unless given; false for none"
+
+  attr :class, :string, default: nil
+
+  def status_pill(assigns) do
+    {label, tone} = status_meta(assigns.status)
+    key = status_key(assigns.status)
+    tip = if is_nil(assigns.tip), do: status_help(key), else: assigns.tip
+
+    assigns =
+      assign(assigns, label: assigns.label || label, tone: tone, key: key, tip: tip || nil)
+
+    ~H"""
+    <span class={[status_pill_class(@tone), @class]} data-tip={@tip} data-tip-title={@tip && @label}>
+      <.status_dot status={@key} />
+      {@label}
+    </span>
+    """
+  end
+
+  @doc """
+  A run's status in a list row: the mark and label, the step it is on or
+  stopped at, and its error on a second line. No pill ground, so a column of
+  them reads quietly; a completed run's label stays neutral and only states
+  that need a look take their color (`DESIGN.md` §6 "List / table row").
+
+      <.run_status run={row} />
+  """
+  attr :run, :map,
+    required: true,
+    doc: "a run with `:status`, `:current_step` and `:error`; `:parked` when it has one"
+
+  attr :now, :any, default: nil, doc: "the page's clock, for a parked run's countdown"
+
+  def run_status(assigns) do
+    run = assigns.run
+    parked = Map.get(run, :parked)
+    key = if parked, do: Atom.to_string(parked.status), else: status_key(run.status)
+    {label, tone} = status_meta(key)
+    {step, where} = step_where(key, run.current_step)
+    error = Trace.error_parts(run.error)
+
+    assigns =
+      assign(assigns,
+        key: key,
+        label: label,
+        tone: run_status_tone(tone),
+        step: step,
+        where: where,
+        then: parked && parked_time(parked, assigns.now || DurableDashboard.Clock.utc_now()),
+        note: (error && error.message) || run_note(run, parked),
+        error_type: error && error.type,
+        tip_title: if(step, do: label <> " " <> where <> step, else: label)
+      )
+
+    ~H"""
+    <div
+      class="flex min-w-0 flex-col leading-tight"
+      data-tip-title={@tip_title}
+      data-tip={@note || status_help(@key)}
+      data-tip-meta={@error_type}
+    >
+      <span class="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+        <.status_dot status={@key} />
+        <span class={["font-medium", @tone]}>{@label}</span>
+        <span :if={@step} class="min-w-0 truncate text-muted-foreground">
+          {@where}<span class={["font-mono text-xs", @tone]}>{@step}</span><span :if={@then}> {@then}</span>
+        </span>
+      </span>
+      <span :if={@note} class="truncate pl-3.5 text-xs text-muted-foreground">{@note}</span>
+    </div>
+    """
+  end
+
+  # The step a run is at, and the word before it: nil once it completed.
+  defp step_where(key, current_step) do
+    step = if key != "completed" && current_step, do: Trace.display_name(current_step)
+    {step, step && "#{where_word(key)} "}
+  end
+
+  defp where_word("compensated"), do: "after"
+  defp where_word("pending"), do: "next"
+  defp where_word(_status), do: "at"
+
+  # "in 12s · 2 of 5", "for 48s", or "due now" once its time has passed.
+  defp parked_time(%{status: :retrying} = parked, now) do
+    left = Trace.time_left(parked.at, now)
+    "#{if left, do: "in #{left}", else: "due now"} · #{Trace.attempts_used(parked)}"
+  end
+
+  defp parked_time(%{status: :snoozed} = parked, now) do
+    if left = Trace.time_left(parked.at, now), do: "for #{left}", else: "· due now"
+  end
+
+  defp run_note(_run, %{reason: reason}), do: reason
+
+  defp run_note(%{status: :pending} = run, nil) do
+    cond do
+      after_id = Map.get(run, :runs_after_id) ->
+        "Waiting for run #{String.slice(after_id, 0, 8)} to finish"
+
+      Map.get(run, :home_queue) ->
+        "Waiting for a slot on #{run.queue}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp run_note(_run, _parked), do: nil
+
+  defp run_status_tone("primary"), do: "text-primary"
+  defp run_status_tone("warning"), do: "text-warning"
+  defp run_status_tone("destructive"), do: "text-destructive"
+  defp run_status_tone("comp"), do: "text-comp"
+  defp run_status_tone(_calm), do: "text-subtle-foreground"
+
+  @doc """
+  The bare status mark — the shape that carries a status wherever a full pill
+  would be too heavy (trace rows, feeds, graph nodes). See `DESIGN.md` §4.
+  """
+  attr :status, :any, required: true
+  attr :class, :string, default: nil
+
+  def status_dot(assigns) do
+    assigns = assign(assigns, key: status_key(assigns.status))
+
+    ~H"""
+    <span class={["st-dot st-#{@key}", @class]} aria-hidden="true"></span>
+    """
+  end
+
+  @status_help %{
+    "pending" => "Queued · waiting for a worker to pick it up",
+    "retrying" => "A step failed · it runs again when its backoff ends",
+    "snoozed" => "A step asked to run again later · a snooze doesn't use an attempt",
+    "running" => "A worker is running its steps now",
+    "waiting" => "Paused on a sleep, an event or a person's input · resumes by itself",
+    "completed" => "Finished every step",
+    "failed" => "A step ran out of attempts · retry picks up from that step",
+    "cancelled" => "Stopped before it finished · by a person, its parent or a timeout",
+    "scheduled" => "Set to start later",
+    "compensating" => "A step failed · undoing the steps before it",
+    "compensated" => "A step failed, and the steps before it were undone",
+    "compensation_failed" => "A step failed, and undoing the steps before it failed too",
+    "timeout" => "Ran past its time limit",
+    "paused" => "Paused · resume to carry on",
+    "alive" => "Sending heartbeats",
+    "missing" => "No heartbeat lately · its runs are taken over once their locks go stale"
+  }
+
+  @doc """
+  What a status means, in a line — the tooltip on a status pill, and for any
+  other place that shows a status and wants to explain it.
+  """
+  @spec status_help(atom() | String.t()) :: String.t() | nil
+  def status_help(status), do: Map.get(@status_help, status_key(status))
+
+  defp status_key(s) when is_atom(s), do: Atom.to_string(s)
+  defp status_key(s) when is_binary(s), do: s
+
+  @status_meta %{
+    "pending" => {"Pending", "muted"},
+    "retrying" => {"Retrying", "warning"},
+    "snoozed" => {"Snoozed", "muted"},
+    "running" => {"Running", "primary"},
+    "waiting" => {"Waiting", "warning"},
+    "completed" => {"Completed", "success"},
+    "failed" => {"Failed", "destructive"},
+    "cancelled" => {"Cancelled", "muted"},
+    "scheduled" => {"Scheduled", "muted"},
+    "compensating" => {"Compensating", "comp"},
+    "compensated" => {"Compensated", "comp"},
+    "compensation_failed" => {"Compensation failed", "destructive"},
+    "timeout" => {"Timed out", "destructive"},
+    "paused" => {"Paused", "warning"},
+    "idle" => {"Idle", "muted"},
+    "alive" => {"Alive", "success"},
+    "missing" => {"Missing", "destructive"}
+  }
+
+  defp status_meta(s) when is_atom(s), do: status_meta(Atom.to_string(s))
+
+  defp status_meta(s) when is_binary(s) do
+    Map.get_lazy(@status_meta, s, fn ->
+      {s |> String.replace("_", " ") |> String.capitalize(), "muted"}
+    end)
+  end
+
+  defp status_pill_class(tone) do
+    base =
+      "inline-flex items-center gap-1.5 h-[22px] pl-[7px] pr-2 rounded-md " <>
+        "text-xs font-medium whitespace-nowrap"
+
+    case tone do
+      "muted" -> base <> " bg-secondary text-subtle-foreground"
+      "primary" -> base <> " bg-primary/13 text-primary"
+      "success" -> base <> " bg-success/13 text-success"
+      "warning" -> base <> " bg-warning/13 text-warning"
+      "destructive" -> base <> " bg-destructive/13 text-destructive"
+      "comp" -> base <> " bg-comp/14 text-comp"
+    end
+  end
+
+  # ============================================================================
+  # Relative time
+  # ============================================================================
+
+  @doc """
+  Renders a relative time like "2m ago" (past) or "in 2h" (future), with a
+  hover tooltip showing the absolute moment in the **viewer's local timezone**.
+
+  Emits a `<time data-ts data-rel>`; the client localizes only the tooltip and
+  leaves the relative text alone (`assets/src/hooks/local_time.ts`). The
+  pre-JS `title` is a UTC fallback so it's still legible. Use this for "ago" /
+  "in" durations; use `local_time` when the user needs the exact moment inline.
+
+  ## Examples
+
+      <.relative_time at={execution.inserted_at} />
+      <.relative_time at={schedule.next_run_at} />
+  """
+  attr :at, :any, required: true
+  attr :class, :string, default: nil
+
+  def relative_time(assigns) do
+    {label, iso} = relative_time_parts(assigns.at)
+    assigns = assign(assigns, label: label, iso: iso)
+
+    ~H"""
+    <time
+      :if={@iso}
+      datetime={@iso}
+      data-ts={@iso}
+      data-rel="1"
+      class={["tabular-nums text-xs", @class]}
+    >{@label}</time>
+    <span :if={!@iso} class={["tabular-nums text-xs", @class]}>{@label}</span>
+    """
+  end
+
+  # {humanized_label, iso8601 | nil}. `data-rel` tells the client to keep the
+  # relative text; the tooltip (`tooltip.ts`) shows the exact moment.
+  defp relative_time_parts(nil), do: {"—", nil}
+
+  defp relative_time_parts(%DateTime{} = dt) do
+    {humanize_diff(DateTime.diff(DurableDashboard.Clock.utc_now(), dt, :second)),
+     DateTime.to_iso8601(dt)}
+  end
+
+  defp relative_time_parts(%NaiveDateTime{} = dt) do
+    case DateTime.from_naive(dt, "Etc/UTC") do
+      {:ok, utc} -> relative_time_parts(utc)
+      _ -> {"—", nil}
+    end
+  end
+
+  defp relative_time_parts(other), do: {to_string(other), nil}
+
+  # Sign-aware: negative diff means the timestamp is in the future ("in 2h").
+  defp humanize_diff(s) when abs(s) < 5, do: "just now"
+  defp humanize_diff(s) when s < 0, do: "in " <> humanize_magnitude(-s)
+  defp humanize_diff(s), do: humanize_magnitude(s) <> " ago"
+
+  defp humanize_magnitude(s) when s < 60, do: "#{s}s"
+  defp humanize_magnitude(s) when s < 3600, do: "#{div(s, 60)}m"
+  defp humanize_magnitude(s) when s < 86_400, do: "#{div(s, 3600)}h"
+  defp humanize_magnitude(s) when s < 604_800, do: "#{div(s, 86_400)}d"
+  defp humanize_magnitude(s) when s < 2_592_000, do: "#{div(s, 604_800)}w"
+  defp humanize_magnitude(s), do: "#{div(s, 2_592_000)}mo"
+
+  @doc """
+  Renders an absolute timestamp in the **viewer's local timezone**.
+
+  The server only knows UTC, so a raw ISO string is ambiguous to read. This
+  emits a `<time>` carrying the UTC ISO (plus a UTC-formatted fallback as its
+  text, so it's legible without JS); the client localizes it to the browser's
+  timezone — see `assets/src/hooks/local_time.ts`. Use this for any absolute
+  time the user reads; use `relative_time` for "2m ago" durations.
+
+  `format` is `"time"` (time of day), `"datetime"` (date + time), or `"date"`.
+
+  ## Examples
+
+      <.local_time at={step.completed_at} format="time" />
+      <.local_time at={log["timestamp"]} format="datetime" class="text-muted-foreground" />
+  """
+  attr :at, :any, required: true
+  attr :format, :string, default: "datetime", values: ~w(time datetime date)
+  attr :class, :any, default: nil
+
+  def local_time(assigns) do
+    {iso, fallback} = local_time_parts(assigns.at, assigns.format)
+    assigns = assign(assigns, iso: iso, fallback: fallback)
+
+    ~H"""
+    <time datetime={@iso} data-ts={@iso} data-format={@format} class={@class}>{@fallback}</time>
+    """
+  end
+
+  # Returns {iso8601_utc | nil, server_fallback_text}. The fallback is what
+  # renders before/without JS — a plain UTC formatting, still legible.
+  defp local_time_parts(nil, _format), do: {nil, "—"}
+
+  defp local_time_parts(%DateTime{} = dt, format),
+    do: {DateTime.to_iso8601(dt), local_time_fallback(dt, format)}
+
+  defp local_time_parts(%NaiveDateTime{} = ndt, format) do
+    case DateTime.from_naive(ndt, "Etc/UTC") do
+      {:ok, dt} -> local_time_parts(dt, format)
+      _ -> {nil, "—"}
+    end
+  end
+
+  defp local_time_parts(s, format) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, dt, _offset} -> {DateTime.to_iso8601(dt), local_time_fallback(dt, format)}
+      _ -> {nil, s}
+    end
+  end
+
+  defp local_time_parts(other, _format), do: {nil, to_string(other)}
+
+  defp local_time_fallback(dt, "time"),
+    do: dt |> Calendar.strftime("%H:%M:%S.%f") |> String.slice(0, 12)
+
+  defp local_time_fallback(dt, "date"), do: Calendar.strftime(dt, "%b %-d, %Y")
+  defp local_time_fallback(dt, _datetime), do: Calendar.strftime(dt, "%b %-d, %Y, %H:%M:%S")
+
+  # ============================================================================
+  # Empty state
+  # ============================================================================
+
+  @doc """
+  Centered empty-state placeholder.
+
+  ## Examples
+
+      <.empty_state title="No workflows yet" />
+      <.empty_state title="No results" description="Try adjusting filters." />
+  """
+  attr :title, :string, required: true
+  attr :description, :string, default: nil
+  attr :icon, :string, default: nil
+  attr :class, :string, default: nil
+  slot :action
+
+  def empty_state(assigns) do
+    ~H"""
+    <div class={[
+      "flex flex-col items-center justify-center text-center py-16 px-6",
+      "text-muted-foreground",
+      @class
+    ]}>
+      <.icon :if={@icon} name={@icon} class="size-8 mb-3 opacity-60" />
+      <h3 class="text-sm font-medium text-foreground">{@title}</h3>
+      <p :if={@description} class="text-xs mt-1 max-w-sm">{@description}</p>
+      <div :if={@action != []} class="mt-4">
+        {render_slot(@action)}
+      </div>
+    </div>
+    """
+  end
+
+  # ============================================================================
+  # Card
+  # ============================================================================
+
+  @doc """
+  A surface container with optional header.
+
+  ## Examples
+
+      <.card>
+        Content
+      </.card>
+
+      <.card>
+        <:title>Section</:title>
+        <:action><.button kind="ghost">View all</.button></:action>
+        Content
+      </.card>
+  """
+  attr :class, :string, default: nil
+  attr :padding, :string, default: "md", values: ~w(none sm md lg)
+  attr :rest, :global
+
+  slot :title
+  slot :action
+  slot :inner_block, required: true
+
+  def card(assigns) do
+    ~H"""
+    <section
+      class={[
+        "rounded-[10px] border border-border bg-card text-card-foreground",
+        @class
+      ]}
+      {@rest}
+    >
+      <header
+        :if={@title != [] or @action != []}
+        class="flex items-center justify-between gap-3 px-4 pt-3.5 pb-2.5"
+      >
+        <h3 :if={@title != []} class="text-sm font-semibold">
+          {render_slot(@title)}
+        </h3>
+        <div :if={@action != []} class="flex items-center gap-2">
+          {render_slot(@action)}
+        </div>
+      </header>
+      <div class={card_padding_class(@padding)}>
+        {render_slot(@inner_block)}
+      </div>
+    </section>
+    """
+  end
+
+  defp card_padding_class("none"), do: ""
+  defp card_padding_class("sm"), do: "p-3"
+  defp card_padding_class("md"), do: "p-4"
+  defp card_padding_class("lg"), do: "p-6"
+
+  # ============================================================================
+  # JSON — syntax-highlighted, pretty-printed value
+  # ============================================================================
+
+  @doc """
+  Renders a decoded term (map / list / scalar from JSONB) as pretty-printed,
+  syntax-highlighted JSON. Keys, strings, numbers, booleans and null are
+  colored via design tokens. Reuse anywhere JSON is shown — logs, I/O, the
+  step inspector — instead of a plain `<pre>` dump.
+
+      <.json value={@step.input} />
+
+  Pass `raw: false`-style scalars freely; non-JSON terms fall back to
+  `inspect/1`.
+  """
+  attr :value, :any, required: true
+  attr :class, :string, default: nil
+  attr :bare, :boolean, default: false
+
+  def json(assigns) do
+    ~H"""
+    <div class="group/json relative">
+      <.copy_button
+        text={json_plain(@value)}
+        label="Copy JSON"
+        class="absolute right-1.5 top-1.5 z-10 opacity-0 transition-opacity group-hover/json:opacity-100 focus-visible:opacity-100"
+      />
+      <pre class={[
+        "thin-scroll overflow-auto font-mono text-[11px] leading-relaxed text-foreground/90",
+        !@bare && "rounded-md border border-border bg-background/50 p-3",
+        @class
+      ]}><%= Phoenix.HTML.raw(json_iodata(@value, 0)) %></pre>
+    </div>
+    """
+  end
+
+  @doc """
+  A small clipboard button. Copies `text` to the clipboard via the global
+  delegated listener (`assets/src/hooks/copy.ts`, wired in `main.ts`) and
+  flashes a check for ~1.4 s. No `phx-hook`/`id` needed — it's plain markup
+  carrying `data-copy`. Drop it beside any copy-worthy value (JSON box, id
+  chip, config value).
+
+      <.copy_button text={@workflow.id} label="Copy execution id" />
+  """
+  attr :text, :string, required: true
+  attr :label, :string, default: "Copy"
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def copy_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      data-copy={@text}
+      aria-label={@label}
+      data-tip={@label}
+      class={[
+        "copy-btn inline-flex shrink-0 items-center justify-center rounded-md p-1",
+        "border border-border bg-card/80 text-muted-foreground backdrop-blur-sm",
+        "hover:bg-accent hover:text-accent-foreground transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        @class
+      ]}
+      {@rest}
+    >
+      <.icon name="clipboard" class="copy-idle size-3.5" />
+      <.icon name="check" class="copy-done size-3.5 text-success" />
+    </button>
+    """
+  end
+
+  # Recursively builds an iolist of raw `<span>`s + HTML-escaped content. We
+  # control every byte of whitespace/indentation here (rather than relying on a
+  # HEEx template inside a <pre>, which would inject its own indentation).
+  defp json_iodata(map, depth) when is_map(map) and not is_struct(map) do
+    case Map.to_list(map) do
+      [] ->
+        json_punct("{}")
+
+      pairs ->
+        inner =
+          pairs
+          |> Enum.map(fn {k, v} ->
+            [json_pad(depth + 1), json_key(k), json_punct(": "), json_iodata(v, depth + 1)]
+          end)
+          |> Enum.intersperse([json_punct(","), "\n"])
+
+        [json_punct("{"), "\n", inner, "\n", json_pad(depth), json_punct("}")]
+    end
+  end
+
+  defp json_iodata([], _depth), do: json_punct("[]")
+
+  defp json_iodata(list, depth) when is_list(list) do
+    inner =
+      list
+      |> Enum.map(fn v -> [json_pad(depth + 1), json_iodata(v, depth + 1)] end)
+      |> Enum.intersperse([json_punct(","), "\n"])
+
+    [json_punct("["), "\n", inner, "\n", json_pad(depth), json_punct("]")]
+  end
+
+  defp json_iodata(v, _depth) when is_binary(v), do: json_token("text-success", json_encode(v))
+  defp json_iodata(v, _depth) when is_boolean(v), do: json_token("text-info", to_string(v))
+  defp json_iodata(nil, _depth), do: json_token("text-muted-foreground", "null")
+
+  defp json_iodata(v, _depth) when is_integer(v) or is_float(v),
+    do: json_token("text-warning", to_string(v))
+
+  defp json_iodata(%mod{} = v, _depth) when mod in [DateTime, Date, NaiveDateTime, Time],
+    do: json_token("text-success", json_encode(to_string(v)))
+
+  defp json_iodata(v, _depth) when is_atom(v),
+    do: json_token("text-success", json_encode(to_string(v)))
+
+  defp json_iodata(v, _depth), do: json_token("text-foreground/80", inspect(v))
+
+  defp json_key(k), do: json_token("text-primary", json_encode(to_string(k)))
+  defp json_pad(n), do: String.duplicate("  ", n)
+
+  # Structural punctuation ({ } [ ] : ,) — HTML-safe characters, no escaping.
+  defp json_punct(s), do: ["<span class=\"text-muted-foreground\">", s, "</span>"]
+
+  defp json_token(class, text) do
+    ["<span class=\"", class, "\">", html_escape_to_string(text), "</span>"]
+  end
+
+  defp json_encode(s) do
+    case Jason.encode(s) do
+      {:ok, encoded} -> encoded
+      _ -> inspect(s)
+    end
+  end
+
+  defp html_escape_to_string(text) do
+    text |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
+  end
+
+  # Plain-text twin of `json_iodata/2` — same pretty layout, no `<span>`s — so
+  # the clipboard copy matches the rendered block byte-for-byte (minus color).
+  defp json_plain(value), do: value |> json_text(0) |> IO.iodata_to_binary()
+
+  defp json_text(map, depth) when is_map(map) and not is_struct(map) do
+    case Map.to_list(map) do
+      [] ->
+        "{}"
+
+      pairs ->
+        inner =
+          pairs
+          |> Enum.map(fn {k, v} ->
+            [json_pad(depth + 1), json_encode(to_string(k)), ": ", json_text(v, depth + 1)]
+          end)
+          |> Enum.intersperse([",", "\n"])
+
+        ["{", "\n", inner, "\n", json_pad(depth), "}"]
+    end
+  end
+
+  defp json_text([], _depth), do: "[]"
+
+  defp json_text(list, depth) when is_list(list) do
+    inner =
+      list
+      |> Enum.map(fn v -> [json_pad(depth + 1), json_text(v, depth + 1)] end)
+      |> Enum.intersperse([",", "\n"])
+
+    ["[", "\n", inner, "\n", json_pad(depth), "]"]
+  end
+
+  defp json_text(v, _depth) when is_binary(v), do: json_encode(v)
+  defp json_text(v, _depth) when is_boolean(v), do: to_string(v)
+  defp json_text(nil, _depth), do: "null"
+  defp json_text(v, _depth) when is_integer(v) or is_float(v), do: to_string(v)
+
+  defp json_text(%mod{} = v, _depth) when mod in [DateTime, Date, NaiveDateTime, Time],
+    do: json_encode(to_string(v))
+
+  defp json_text(v, _depth) when is_atom(v), do: json_encode(to_string(v))
+  defp json_text(v, _depth), do: inspect(v)
+
+  # ============================================================================
+  # Heading
+  # ============================================================================
+
+  @doc """
+  Page / section heading.
+
+  ## Examples
+
+      <.heading level={1}>Workflows</.heading>
+      <.heading level={2} subtitle="Past 24 hours">Activity</.heading>
+  """
+  attr :level, :integer, default: 1, values: [1, 2, 3]
+  attr :subtitle, :string, default: nil
+  attr :class, :string, default: nil
+  slot :inner_block, required: true
+
+  def heading(assigns) do
+    ~H"""
+    <div class={["flex flex-col gap-0.5", @class]}>
+      <.heading_tag level={@level}>
+        {render_slot(@inner_block)}
+      </.heading_tag>
+      <p :if={@subtitle} class="text-xs text-muted-foreground">{@subtitle}</p>
+    </div>
+    """
+  end
+
+  attr :level, :integer, required: true
+  slot :inner_block, required: true
+
+  defp heading_tag(%{level: 1} = assigns) do
+    ~H"""
+    <h1 class="text-[20px] font-semibold tracking-[-0.01em] leading-tight">{render_slot(@inner_block)}</h1>
+    """
+  end
+
+  defp heading_tag(%{level: 2} = assigns) do
+    ~H"""
+    <h2 class="text-base font-semibold">{render_slot(@inner_block)}</h2>
+    """
+  end
+
+  defp heading_tag(%{level: 3} = assigns) do
+    ~H"""
+    <h3 class="text-sm font-semibold">{render_slot(@inner_block)}</h3>
+    """
+  end
+
+  # ============================================================================
+  # Code (inline + block)
+  # ============================================================================
+
+  @doc """
+  Renders code in monospace. Use for IDs, JSON snippets, durations.
+
+  ## Examples
+
+      <.code>{exec.id}</.code>
+      <.code class="text-info">{job.queue}</.code>
+  """
+  attr :class, :string, default: nil
+  attr :copy, :string, default: nil
+  slot :inner_block, required: true
+
+  def code(assigns) do
+    ~H"""
+    <span :if={@copy} class="group/code inline-flex items-center gap-1 align-middle">
+      <code class={code_class(@class)}>{render_slot(@inner_block)}</code>
+      <.copy_button
+        text={@copy}
+        class="opacity-0 group-hover/code:opacity-100 focus-visible:opacity-100"
+      />
+    </span>
+    <code :if={!@copy} class={code_class(@class)}>{render_slot(@inner_block)}</code>
+    """
+  end
+
+  @doc """
+  A run's workflow key: the caption `key` beside the value in mono, with a
+  hover copy button. `holds` adds a neutral badge — `true` "Holds key";
+  `false` "Key moved" when another run holds it (`holder`), "Key released"
+  when `released`, else "Key free" — and `holder` (`%{id, status}`) names who
+  holds it in the tooltip. Renders nothing for a run without a key. See
+  `DESIGN.md` §5.
+
+      <.key_chip key={run.key} holds={run.holds_key} holder={@holder} />
+  """
+  attr :key, :string, default: nil
+  attr :holds, :any, default: nil, doc: "true, false, or nil for no badge"
+  attr :holder, :map, default: nil, doc: "the run holding the key, `%{id, status}`"
+  attr :released, :boolean, default: false, doc: "an operator released this run's key"
+  attr :class, :any, default: nil
+
+  def key_chip(%{key: nil} = assigns), do: ~H""
+
+  def key_chip(assigns) do
+    assigns = assign(assigns, tip: key_tip(assigns))
+
+    ~H"""
+    <span class={["group/key inline-flex items-center gap-1.5 align-middle", @class]}>
+      <span
+        class="inline-flex h-[22px] items-center gap-1.5 rounded-[5px] bg-secondary px-1.5 text-xs"
+        data-tip-title="Workflow key"
+        data-tip={@tip}
+      >
+        <span class="text-muted-foreground">key</span>
+        <span class="font-mono text-foreground">{@key}</span>
+      </span>
+      <.copy_button
+        text={@key}
+        label="Copy key"
+        class="opacity-0 group-hover/key:opacity-100 focus-visible:opacity-100"
+      />
+      <.badge :if={@holds == true} kind="muted">Holds key</.badge>
+      <.badge :if={@holds == false and @holder != nil} kind="muted">Key moved</.badge>
+      <.badge :if={@holds == false and @holder == nil and @released} kind="muted">Key released</.badge>
+      <.badge :if={@holds == false and @holder == nil and !@released} kind="muted">Key free</.badge>
+    </span>
+    """
+  end
+
+  defp key_tip(%{holds: true}), do: "This run holds it · a start with this key returns this run"
+
+  defp key_tip(%{holder: %{id: id, status: status}}),
+    do: "Held by #{String.slice(id, 0, 8)} · #{elem(status_meta(status), 0)}"
+
+  defp key_tip(%{holds: false}), do: "No run holds it now · the next start with it takes it"
+  defp key_tip(_assigns), do: "Starts with this key make at most one run at a time"
+
+  defp code_class(class) do
+    [
+      "font-mono text-numeric text-xs text-foreground/90",
+      "px-1 py-0.5 rounded-sm bg-muted/40 border border-border",
+      class
+    ]
+  end
+
+  # ============================================================================
+  # Label + field — the app's standard "this is a label, not a value" idiom
+  # ============================================================================
+
+  @doc """
+  A small sentence-case caption in the muted tone — the standard treatment
+  for key names, column headers and metadata keys, so a label reads as a
+  label, not a value. Labels are sans and never uppercase; mono is for values
+  (ids, numbers, durations). See `DESIGN.md` §2.2.
+
+  ## Examples
+
+      <.label>level</.label>
+      <.label class="text-destructive">error</.label>
+  """
+  attr :class, :any, default: nil
+  attr :rest, :global
+  slot :inner_block, required: true
+
+  def label(assigns) do
+    ~H"""
+    <span
+      class={[
+        "text-xs text-muted-foreground",
+        @class
+      ]}
+      {@rest}
+    >{render_slot(@inner_block)}</span>
+    """
+  end
+
+  @doc """
+  One key/value detail row, rendered as a `<dt>`/`<dd>` **grid cell pair**.
+
+  Place several inside `<.field_list>` (or any `display: grid` `<dl>` with two
+  columns + `items-baseline`). The label column auto-sizes to the widest key,
+  so labels hug their values and every value shares one left edge — no ragged
+  fixed-width gutter.
+
+  ## Examples
+
+      <.field_list>
+        <.field key="level">info</.field>
+        <.field key="source">logger</.field>
+      </.field_list>
+  """
+  attr :key, :string, required: true
+  attr :class, :any, default: nil
+  slot :inner_block, required: true
+
+  def field(assigns) do
+    ~H"""
+    <dt class="pt-px"><.label>{@key}</.label></dt>
+    <dd class={["min-w-0 break-words font-mono text-[11px] text-foreground/85", @class]}>{render_slot(@inner_block)}</dd>
+    """
+  end
+
+  @doc """
+  Grid container for `<.field>` rows: a two-column `auto / 1fr` `<dl>` with a
+  tight, even rhythm and baseline-aligned cells. The single source of truth
+  for "aligned key/value metadata table".
+
+  ## Examples
+
+      <.field_list>
+        <.field key="level">info</.field>
+        <.field key="time">{ts}</.field>
+      </.field_list>
+  """
+  attr :class, :any, default: nil
+  slot :inner_block, required: true
+
+  def field_list(assigns) do
+    ~H"""
+    <dl class={[
+      "grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1.5",
+      @class
+    ]}>
+      {render_slot(@inner_block)}
+    </dl>
+    """
+  end
+
+  # ============================================================================
+  # Skeleton — loading placeholder
+  # ============================================================================
+
+  @doc """
+  Animated placeholder. Use to indicate that a section is loading without
+  collapsing layout. Composable: stack multiple skeletons of varying widths
+  to mimic the shape of the eventual content.
+
+  ## Examples
+
+      <.skeleton class="h-4 w-32" />
+      <.skeleton class="h-8 w-full" />
+      <.skeleton variant="circle" class="size-8" />
+  """
+  attr :class, :string, default: "h-4 w-full"
+  attr :variant, :string, default: "default", values: ~w(default circle pill)
+  attr :rest, :global
+
+  def skeleton(assigns) do
+    ~H"""
+    <div
+      aria-hidden="true"
+      class={[
+        "animate-pulse bg-muted/60",
+        skeleton_shape(@variant),
+        @class
+      ]}
+      {@rest}
+    >
+    </div>
+    """
+  end
+
+  defp skeleton_shape("circle"), do: "rounded-full"
+  defp skeleton_shape("pill"), do: "rounded-full"
+  defp skeleton_shape(_), do: "rounded-md"
+
+  # ============================================================================
+  # Error state — distinct from empty_state for "something failed" surfaces
+  # ============================================================================
+
+  @doc """
+  Centered error placeholder with semantic destructive styling and an
+  optional retry action. Distinct from `<.empty_state>` so operators
+  immediately see the difference between "nothing here yet" and
+  "something is broken."
+
+  ## Examples
+
+      <.error_state title="Failed to load workflows" />
+      <.error_state title="..." description="..." reason="DBConnection timeout">
+        <:action><.button kind="ghost" phx-click="retry">Retry</.button></:action>
+      </.error_state>
+  """
+  attr :title, :string, required: true
+  attr :description, :string, default: nil
+  attr :reason, :string, default: nil
+  attr :class, :string, default: nil
+  slot :action
+
+  def error_state(assigns) do
+    ~H"""
+    <div
+      role="alert"
+      class={[
+        "flex flex-col items-center justify-center text-center py-16 px-6",
+        @class
+      ]}
+    >
+      <div class="size-10 mb-3 rounded-full bg-destructive/10 border border-destructive/20 flex items-center justify-center">
+        <.icon name="exclamation-triangle" class="size-5 text-destructive" />
+      </div>
+      <h3 class="text-sm font-medium text-foreground">{@title}</h3>
+      <p :if={@description} class="text-xs mt-1 max-w-sm text-muted-foreground">
+        {@description}
+      </p>
+      <p :if={@reason} class="text-[11px] font-mono mt-2 max-w-md text-destructive/80 break-words">
+        {@reason}
+      </p>
+      <div :if={@action != []} class="mt-4">
+        {render_slot(@action)}
+      </div>
+    </div>
+    """
+  end
+
+  # ============================================================================
+  # Misc helpers re-exported
+  # ============================================================================
+
+  @doc """
+  `JS.dispatch/2` shim convenience used by the theme toggle.
+  """
+  def toggle_theme do
+    JS.dispatch("durable:toggle-theme", to: "html")
+  end
+end

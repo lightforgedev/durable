@@ -1,0 +1,164 @@
+defmodule Durable.Storage.Schemas.ScheduledWorkflow do
+  @moduledoc """
+  Ecto schema for scheduled workflow records.
+
+  Scheduled workflows represent cron-based recurring workflow executions.
+  """
+
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  alias Crontab.CronExpression.Parser, as: CronParser
+  alias Durable.Clock
+  alias Durable.Storage.Schemas.WorkflowExecution
+
+  @type t :: %__MODULE__{
+          id: Ecto.UUID.t(),
+          name: String.t(),
+          workflow_module: String.t(),
+          workflow_name: String.t(),
+          cron_expression: String.t(),
+          timezone: String.t(),
+          input: map(),
+          queue: String.t(),
+          enabled: boolean(),
+          source: String.t(),
+          last_run_at: DateTime.t() | nil,
+          next_run_at: DateTime.t() | nil,
+          last_error: String.t() | nil,
+          last_error_at: DateTime.t() | nil,
+          consecutive_failures: integer(),
+          auto_disabled_at: DateTime.t() | nil,
+          inserted_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  @schema_prefix "durable"
+  schema "scheduled_workflows" do
+    field(:name, :string)
+    field(:workflow_module, :string)
+    field(:workflow_name, :string)
+    field(:cron_expression, :string)
+    field(:timezone, :string, default: "UTC")
+    field(:input, Durable.Storage.JsonMap, default: %{})
+    field(:queue, :string, default: "default")
+    field(:key, :string)
+    field(:enabled, :boolean, default: true)
+    # "api" (`Durable.schedule/3`), "code" (`@schedule`), or "removed" (its
+    # `@schedule` is gone, so it was turned off at boot).
+    field(:source, :string, default: "api")
+    field(:last_run_at, :utc_datetime_usec)
+    field(:next_run_at, :utc_datetime_usec)
+    # Bug L-1 — scheduler resilience tracking
+    field(:last_error, :string)
+    field(:last_error_at, :utc_datetime_usec)
+    field(:consecutive_failures, :integer, default: 0)
+    field(:auto_disabled_at, :utc_datetime_usec)
+
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
+  end
+
+  @required_fields [:name, :workflow_module, :workflow_name, :cron_expression]
+  @optional_fields [
+    :timezone,
+    :input,
+    :queue,
+    :enabled,
+    :source,
+    :last_run_at,
+    :next_run_at,
+    :last_error,
+    :last_error_at,
+    :consecutive_failures,
+    :auto_disabled_at
+  ]
+
+  @doc """
+  Creates a changeset for inserting or updating a scheduled workflow.
+  """
+  def changeset(scheduled_workflow, attrs) do
+    scheduled_workflow
+    |> cast(attrs, @required_fields ++ @optional_fields)
+    |> WorkflowExecution.cast_key(attrs)
+    |> validate_required(@required_fields)
+    |> unique_constraint(:name)
+    |> validate_cron_expression()
+  end
+
+  @doc """
+  Creates a changeset for enabling/disabling a scheduled workflow.
+  """
+  def enable_changeset(scheduled_workflow, true) do
+    cast(scheduled_workflow, Map.put(cleared_failures(), :enabled, true), [
+      :enabled | Map.keys(cleared_failures())
+    ])
+  end
+
+  def enable_changeset(scheduled_workflow, false) do
+    cast(scheduled_workflow, %{enabled: false}, [:enabled])
+  end
+
+  @doc """
+  The fields that say a schedule has been failing, reset. Turning it back on
+  starts it with a clean record.
+  """
+  def cleared_failures do
+    %{auto_disabled_at: nil, consecutive_failures: 0, last_error: nil, last_error_at: nil}
+  end
+
+  @doc """
+  Creates a changeset for upserting during registration.
+
+  Updates cron, timezone, input, and queue. `API.register/2` includes
+  `:next_run_at` when the cron or time zone changed and `:enabled` when a
+  removed `@schedule` came back; anything else about the record is preserved.
+  """
+  def upsert_changeset(scheduled_workflow, attrs) do
+    upsert_fields = [
+      :workflow_module,
+      :workflow_name,
+      :cron_expression,
+      :timezone,
+      :input,
+      :queue,
+      :source,
+      :next_run_at,
+      :enabled
+    ]
+
+    scheduled_workflow
+    |> cast(attrs, [:name | upsert_fields])
+    |> WorkflowExecution.cast_key(attrs)
+    |> validate_required(@required_fields)
+    |> validate_cron_expression()
+  end
+
+  @doc """
+  Creates a changeset for updating a schedule's configuration.
+  """
+  def update_changeset(scheduled_workflow, attrs) do
+    update_fields =
+      [:cron_expression, :timezone, :input, :queue, :enabled, :next_run_at] ++
+        Map.keys(cleared_failures())
+
+    scheduled_workflow
+    |> cast(attrs, update_fields)
+    |> WorkflowExecution.cast_key(attrs)
+    |> validate_cron_expression()
+  end
+
+  defp validate_cron_expression(changeset) do
+    case get_change(changeset, :cron_expression) do
+      nil ->
+        changeset
+
+      cron ->
+        case CronParser.parse(cron) do
+          {:ok, _} -> changeset
+          {:error, _} -> add_error(changeset, :cron_expression, "is not a valid cron expression")
+        end
+    end
+  end
+end

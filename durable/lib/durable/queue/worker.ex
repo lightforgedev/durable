@@ -1,0 +1,420 @@
+defmodule Durable.Queue.Worker do
+  @moduledoc """
+  Executes a single workflow job in an isolated process.
+
+  Each worker runs under a DynamicSupervisor with `restart: :temporary`,
+  ensuring that:
+  - Each workflow execution is isolated
+  - A crash in one worker does not affect others
+  - Workers are not automatically restarted (stale lock recovery handles retries)
+
+  The worker spawns job execution in a separate Task, allowing the GenServer
+  to send periodic heartbeats to update `locked_at` and prevent stale lock
+  recovery from incorrectly reclaiming long-running jobs. It traps exits, so a
+  Task that dies (a linked process crashed, or something killed it) is an
+  attempt it can record rather than a crash that takes it down too.
+  """
+
+  use GenServer, restart: :temporary
+
+  require Logger
+
+  alias Durable.Config
+  alias Durable.Executor.StepRunner
+  alias Durable.Queue.Adapter
+
+  defstruct [
+    :job,
+    :config,
+    :poller_pid,
+    :started_at,
+    :beat_at,
+    :task_ref,
+    :task_pid,
+    :heartbeat_timer
+  ]
+
+  @type t :: %__MODULE__{
+          job: map(),
+          config: Config.t(),
+          poller_pid: pid(),
+          started_at: integer(),
+          beat_at: integer(),
+          task_ref: reference() | nil,
+          task_pid: pid() | nil,
+          heartbeat_timer: reference() | nil
+        }
+
+  @doc """
+  Starts a worker process to execute a job.
+
+  ## Options
+
+  - `:job` - The job map to execute (required)
+  - `:config` - The Durable configuration (required)
+  - `:poller_pid` - The poller process to report completion to (required)
+  """
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  @doc false
+  # A poller that replaced a dead one takes over its workers: this one reports
+  # to the caller from now on. Returns its job, or nil if it has gone.
+  @spec adopt(pid()) :: map() | nil
+  def adopt(worker) do
+    GenServer.call(worker, {:adopt, self()})
+  catch
+    :exit, _gone -> nil
+  end
+
+  # GenServer callbacks
+
+  @impl true
+  def handle_call({:adopt, poller}, _from, state),
+    do: {:reply, state.job, %{state | poller_pid: poller}}
+
+  # The task asks before it puts its run back after a lost connection. Back on
+  # its queue the run is no longer this claim's, and a heartbeat that heard so
+  # before the task had sent the ends of the attempts it closed killed the task
+  # first: closed, with no end (rule 11). The work stays in the task, so this
+  # process still answers a poller that adopts it.
+  def handle_call(:stop_heartbeat, _from, state) do
+    cancel_heartbeat(state.heartbeat_timer)
+
+    receive do
+      :heartbeat -> :ok
+    after
+      0 -> :ok
+    end
+
+    {:reply, :ok, %{state | heartbeat_timer: nil}}
+  end
+
+  @impl true
+  def init(opts) do
+    Process.flag(:trap_exit, true)
+
+    job = Keyword.fetch!(opts, :job)
+    config = Keyword.fetch!(opts, :config)
+    poller_pid = Keyword.fetch!(opts, :poller_pid)
+
+    now = System.monotonic_time(:millisecond)
+
+    state = %__MODULE__{
+      job: job,
+      config: config,
+      poller_pid: poller_pid,
+      started_at: now,
+      # The claim is the first refresh of the lock.
+      beat_at: now,
+      task_ref: nil,
+      heartbeat_timer: nil
+    }
+
+    {:ok, state, {:continue, :start_execution}}
+  end
+
+  @impl true
+  def handle_continue(:start_execution, state) do
+    # Spawn job execution in a separate process so we can handle heartbeats
+    worker = self()
+    task = Task.async(fn -> execute_job(state.job, state.config, worker) end)
+
+    # Start heartbeat timer
+    timer = schedule_heartbeat(state.config.heartbeat_interval)
+
+    {:noreply, %{state | task_ref: task.ref, task_pid: task.pid, heartbeat_timer: timer}}
+  end
+
+  @impl true
+  def handle_info(:heartbeat, state) do
+    # Refresh the lock, passing the per-claim fencing token so a heartbeat can
+    # tell whether we've been fenced out by stale-lock recovery + reclaim.
+    sent = System.monotonic_time(:millisecond)
+
+    case beat_within_lease(state.config, state.job.id, state.job[:lock_token], state.beat_at) do
+      {:error, :fenced} ->
+        self_fence(state)
+
+      {:error, :cancelled} ->
+        stop_cancelled(state)
+
+      :ok ->
+        emit_heartbeat_telemetry(state.job)
+        timer = schedule_heartbeat(state.config.heartbeat_interval)
+        {:noreply, %{state | heartbeat_timer: timer, beat_at: sent}}
+
+      {:error, reason} ->
+        Logger.warning("Heartbeat failed for job #{state.job.id}: #{inspect(reason)}")
+        emit_heartbeat_telemetry(state.job)
+
+        if lease_lost?(state.config, state.beat_at) do
+          self_fence(state)
+        else
+          timer = schedule_heartbeat(state.config.heartbeat_interval)
+          {:noreply, %{state | heartbeat_timer: timer}}
+        end
+    end
+  end
+
+  # Task completed successfully
+  @impl true
+  def handle_info({ref, result}, %{task_ref: ref} = state) do
+    Process.demonitor(ref, [:flush])
+    cancel_heartbeat(state.heartbeat_timer)
+
+    duration_ms = System.monotonic_time(:millisecond) - state.started_at
+
+    emit_telemetry(state.job, result, duration_ms)
+    settle_and_report(state, result, duration_ms)
+
+    {:stop, :normal, state}
+  end
+
+  # The task died: a process linked to it crashed, or something killed it.
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{task_ref: ref} = state) do
+    cancel_heartbeat(state.heartbeat_timer)
+
+    message = Exception.format_exit(reason)
+    Logger.error("Task crashed for job #{state.job.id}: #{message}")
+
+    error = %{type: "task_crash", message: message}
+    duration_ms = System.monotonic_time(:millisecond) - state.started_at
+
+    # If this can't reach the database either, the run stays locked and stale
+    # recovery takes it back.
+    result =
+      safely(:fenced, fn -> Durable.Executor.attempt_died(state.job, error, state.config) end)
+
+    emit_telemetry(state.job, result, duration_ms)
+    settle_and_report(state, result, duration_ms)
+
+    {:stop, :normal, state}
+  end
+
+  # A dead task's exit signal. Its :DOWN does the work.
+  @impl true
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
+
+  # Private functions
+
+  # The worker settles its own result, by its claim's token, and only then
+  # tells the poller, which has nothing left to do but free the slot. Left to
+  # the poller, a result sent to one that had just died was never settled: the
+  # run stayed locked for the stale sweep.
+  defp settle_and_report(state, result, duration_ms) do
+    safely(:ok, fn -> settle(state.config, state.job, result) end)
+    send(state.poller_pid, {:job_complete, self(), state.job.id, result, duration_ms})
+  end
+
+  defp settle(config, job, :ok),
+    do: Adapter.default_adapter().ack(config, job.id, job[:lock_token])
+
+  # Fails the run if nothing recorded how it ended: the executor raised
+  # outside a step, a compensation died, or the run lost its worker too often.
+  defp settle(config, job, {:error, reason}),
+    do: Adapter.default_adapter().nack(config, job.id, reason, job[:lock_token])
+
+  # :fenced — the row is its new owner's, or a cancel queued its undo, which
+  # waits for this worker to let go.
+  defp settle(config, job, :fenced), do: Adapter.default_adapter().let_go(config, job.id)
+
+  # :waiting — the executor made the run wait, or put it back on its queue.
+  defp settle(_config, _job, :waiting), do: :ok
+
+  defp execute_job(job, config, worker) do
+    case Durable.Executor.execute_workflow(job.id, config, job[:lock_token]) do
+      {:ok, _execution} ->
+        :ok
+
+      {:waiting, _execution} ->
+        # Workflow is waiting for sleep/event/input - not an error
+        :waiting
+
+      {:error, :superseded} ->
+        # Cancelled or reclaimed while we ran: the row's status is someone
+        # else's now, so the poller must neither ack nor nack it.
+        :fenced
+
+      {:error, error} ->
+        {:error, error}
+    end
+  rescue
+    error ->
+      if Durable.Repo.transient?(error),
+        do: release_after_lost_connection(job, config, error, worker),
+        else: crashed(job, error, __STACKTRACE__)
+  catch
+    kind, reason ->
+      Logger.error(
+        "Worker caught #{kind} executing job #{job.id}: " <>
+          Exception.format(kind, reason, __STACKTRACE__)
+      )
+
+      {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
+  end
+
+  # Says nothing about the step, so the run goes back rather than failing.
+  defp release_after_lost_connection(job, config, error, worker) do
+    Logger.error(
+      "Lost the database connection, or it gave up on a statement, running job " <>
+        "#{job.id}: #{Exception.message(error)}"
+    )
+
+    # A heartbeat under way answers first; one that finds the claim gone kills
+    # this task, as it should.
+    :ok = GenServer.call(worker, :stop_heartbeat, :infinity)
+    safely(:fenced, fn -> Durable.Executor.connection_lost(job, error, config) end)
+  end
+
+  defp crashed(job, error, stacktrace) do
+    Logger.error(
+      "Worker crashed executing job #{job.id}: #{Exception.message(error)}\n" <>
+        Exception.format_stacktrace(stacktrace)
+    )
+
+    {:error,
+     %{
+       type: inspect(error.__struct__),
+       message: Exception.message(error),
+       stacktrace: Exception.format_stacktrace(stacktrace)
+     }}
+  end
+
+  # We've been fenced: our claim was released (stale-lock recovery, a cancel
+  # that queued the run's undo) or another worker re-claimed it. Abort the
+  # in-flight Task so we don't run the workflow a second time (and stomp the
+  # new owner). Report `:fenced` to the poller so it cleans us up WITHOUT
+  # acking/nacking the row.
+  defp self_fence(state) do
+    Logger.error(
+      "[Durable] worker for job #{state.job.id} was fenced (its claim was released, " <>
+        "taken by another worker, or couldn't be refreshed in time) — aborting to avoid " <>
+        "a duplicate execution"
+    )
+
+    duration_ms = stop_task(state)
+
+    :telemetry.execute(
+      [:durable, :queue, :worker_fenced],
+      %{count: 1, duration: System.convert_time_unit(duration_ms, :millisecond, :native)},
+      %{job_id: state.job.id, queue: state.job.queue}
+    )
+
+    Durable.Activity.record(state.config, "worker_fenced",
+      queue: state.job.queue,
+      workflow_id: state.job.id
+    )
+
+    send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
+
+    {:stop, :normal, %{state | heartbeat_timer: nil}}
+  end
+
+  # The lock was last refreshed at `beat_at`, and the stale sweep may hand the
+  # run to another node once it's `stale_lock_timeout` old. A worker that
+  # can't reach the database can't hear of that, so it stops its step a
+  # heartbeat before then: past it, the step would run on beside its next
+  # attempt. A pool that refuses for a few seconds is nowhere near it.
+  # A database that stops answering holds a query for its timeout, 15 seconds
+  # by default, which can be past the lease: the step would run on beside its
+  # next attempt. The heartbeat is given until the lease runs out. Also the
+  # heartbeat of a caller running a run inline (`Executor.keeping_claim/3`).
+  @doc false
+  def beat_within_lease(config, job_id, lock_token, beat_at) do
+    left = beat_at + lease_ms(config) - System.monotonic_time(:millisecond)
+    adapter = Adapter.default_adapter()
+    beat = Task.async(fn -> adapter.heartbeat(config, job_id, lock_token) end)
+
+    case Task.yield(beat, max(left, 0)) || Task.shutdown(beat, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:error, reason}
+      nil -> {:error, :no_answer_in_lease}
+    end
+  end
+
+  @doc false
+  def lease_lost?(config, beat_at),
+    do: System.monotonic_time(:millisecond) - beat_at >= lease_ms(config)
+
+  defp lease_ms(config), do: config.stale_lock_timeout * 1_000 - config.heartbeat_interval
+
+  # Cancelled while its step ran. The cancel already settled the run, so this
+  # only stops the work and closes the attempt.
+  defp stop_cancelled(state) do
+    Logger.info("[Durable] stopping the step of job #{state.job.id}: the run was cancelled")
+
+    duration_ms = stop_task(state)
+
+    safely(:ok, fn -> StepRunner.close_cancelled(state.config, state.job.id) end)
+    safely(:ok, fn -> Adapter.default_adapter().let_go(state.config, state.job.id) end)
+
+    emit_telemetry(state.job, :fenced, duration_ms)
+    send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
+
+    {:stop, :normal, %{state | heartbeat_timer: nil}}
+  end
+
+  defp stop_task(state) do
+    cancel_heartbeat(state.heartbeat_timer)
+    if state.task_ref, do: Process.demonitor(state.task_ref, [:flush])
+    if state.task_pid && Process.alive?(state.task_pid), do: Process.exit(state.task_pid, :kill)
+
+    System.monotonic_time(:millisecond) - state.started_at
+  end
+
+  defp safely(fallback, fun) do
+    fun.()
+  rescue
+    error ->
+      Logger.error("[Durable] worker cleanup failed: #{Exception.message(error)}")
+      fallback
+  catch
+    :exit, reason ->
+      Logger.error("[Durable] worker cleanup failed: #{inspect(reason)}")
+      fallback
+  end
+
+  defp schedule_heartbeat(interval) do
+    Process.send_after(self(), :heartbeat, interval)
+  end
+
+  defp cancel_heartbeat(nil), do: :ok
+  defp cancel_heartbeat(timer), do: Process.cancel_timer(timer)
+
+  defp emit_telemetry(job, result, duration_ms) do
+    status =
+      case result do
+        :ok -> :completed
+        :waiting -> :waiting
+        :fenced -> :superseded
+        {:error, _} -> :failed
+      end
+
+    :telemetry.execute(
+      [:durable, :queue, :job_completed],
+      %{duration: System.convert_time_unit(duration_ms, :millisecond, :native)},
+      %{
+        job_id: job.id,
+        queue: job.queue,
+        workflow_module: job.workflow_module,
+        workflow_name: job.workflow_name,
+        status: status
+      }
+    )
+  end
+
+  defp emit_heartbeat_telemetry(job) do
+    :telemetry.execute(
+      [:durable, :queue, :heartbeat],
+      %{count: 1},
+      %{
+        job_id: job.id,
+        queue: job.queue
+      }
+    )
+  end
+end

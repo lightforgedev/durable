@@ -1,0 +1,381 @@
+defmodule Durable.Queue.Poller do
+  @moduledoc """
+  GenServer that polls a queue for jobs and starts workers to execute them.
+
+  Each poller handles a single queue and maintains:
+  - A set of active job IDs being processed
+  - Concurrency limits
+  - Poll interval configuration
+
+  The poller monitors workers and frees a worker's slot when it reports. Each
+  worker settles its own run (ack/nack) before it does.
+  """
+
+  use GenServer
+
+  require Logger
+
+  alias Durable.Config
+  alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Queue.Adapter
+  alias Durable.Queue.Drainer
+  alias Durable.Queue.Worker
+
+  defstruct [
+    :config,
+    :queue_name,
+    :concurrency,
+    :poll_interval,
+    :worker_supervisor,
+    :node_id,
+    :workers,
+    :paused,
+    :timer_ref,
+    backlog?: false
+  ]
+
+  @type t :: %__MODULE__{
+          config: Config.t(),
+          queue_name: String.t(),
+          concurrency: pos_integer(),
+          poll_interval: pos_integer(),
+          worker_supervisor: atom() | pid(),
+          node_id: String.t(),
+          workers: %{pid() => %{ref: reference(), job_id: String.t(), token: String.t() | nil}},
+          paused: boolean(),
+          timer_ref: reference() | nil,
+          backlog?: boolean()
+        }
+
+  @default_concurrency 10
+  @default_poll_interval 1000
+
+  # Client API
+
+  @doc """
+  Starts the poller process.
+
+  ## Options
+
+  - `:config` - The Durable configuration (required)
+  - `:queue_name` - The name of the queue to poll (required)
+  - `:concurrency` - Maximum concurrent workers (default: 10)
+  - `:poll_interval` - Milliseconds between polls (default: 1000)
+  - `:worker_supervisor` - The DynamicSupervisor for workers (required)
+  """
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Pauses the poller, stopping it from claiming new jobs.
+  """
+  @spec pause(GenServer.server()) :: :ok
+  def pause(server) do
+    GenServer.call(server, :pause)
+  end
+
+  @doc """
+  Resumes the poller after being paused.
+  """
+  @spec resume(GenServer.server()) :: :ok
+  def resume(server) do
+    GenServer.call(server, :resume)
+  end
+
+  @doc """
+  Drains the poller, waiting for all active jobs to complete.
+
+  Returns `:ok` when all jobs are complete or `{:error, :timeout}` if
+  the timeout is exceeded.
+  """
+  @spec drain(GenServer.server(), timeout()) :: :ok | {:error, :timeout}
+  def drain(server, timeout \\ 30_000) do
+    GenServer.call(server, {:drain, timeout}, timeout + 1000)
+  end
+
+  @doc """
+  Returns the current state of the poller for debugging.
+  """
+  @spec status(GenServer.server()) :: map()
+  def status(server) do
+    GenServer.call(server, :status)
+  end
+
+  # GenServer callbacks
+
+  @impl true
+  def init(opts) do
+    config = Keyword.fetch!(opts, :config)
+    queue_name = Keyword.fetch!(opts, :queue_name)
+    worker_supervisor = Keyword.fetch!(opts, :worker_supervisor)
+
+    state = %__MODULE__{
+      config: config,
+      queue_name: queue_name,
+      concurrency: Keyword.get(opts, :concurrency, @default_concurrency),
+      poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
+      worker_supervisor: worker_supervisor,
+      node_id: config.node_id,
+      workers: adopt_workers(worker_supervisor),
+      # A poller restarted on a node that is draining doesn't claim either.
+      paused: Drainer.stopping?(config.name),
+      timer_ref: nil
+    }
+
+    # A start or resume on this queue wakes us (Durable.PubSub.wake/2), so a
+    # long poll_interval doesn't delay new work. No-op without a PubSub.
+    _ = DurablePubSub.subscribe(config, DurablePubSub.queue_topic(config, queue_name))
+
+    # Start polling
+    state = schedule_poll(state, 0)
+
+    Logger.info("Queue poller started for queue=#{queue_name} concurrency=#{state.concurrency}")
+
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call(:pause, _from, state) do
+    Logger.info("Pausing queue poller for #{state.queue_name}")
+    {:reply, :ok, %{state | paused: true}}
+  end
+
+  @impl true
+  def handle_call(:resume, _from, state) do
+    Logger.info("Resuming queue poller for #{state.queue_name}")
+    state = %{state | paused: false}
+    state = schedule_poll(state, 0)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_call({:drain, timeout}, from, state) do
+    state = %{state | paused: true}
+
+    cond do
+      state.workers == %{} ->
+        {:reply, :ok, state}
+
+      # No time to wait: a node with `shutdown_grace_period: 0` hands its runs
+      # back at once.
+      timeout <= 0 ->
+        {:reply, {:error, :timeout}, state}
+
+      true ->
+        Process.send_after(
+          self(),
+          {:drain_check, from, timeout, System.monotonic_time(:millisecond)},
+          100
+        )
+
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    status = %{
+      queue_name: state.queue_name,
+      concurrency: state.concurrency,
+      poll_interval: state.poll_interval,
+      active_jobs: map_size(state.workers),
+      paused: state.paused,
+      node_id: state.node_id
+    }
+
+    {:reply, status, state}
+  end
+
+  @impl true
+  def handle_info(:poll, state) do
+    state = %{state | timer_ref: nil}
+
+    state =
+      if state.paused do
+        state
+      else
+        poll_and_process(state)
+      end
+
+    # Schedule next poll
+    state = schedule_poll(state, state.poll_interval)
+
+    {:noreply, state}
+  end
+
+  # Poll now, between scheduled polls. A burst of wakes stops polling once
+  # every slot is taken.
+  @impl true
+  def handle_info({:durable_wake, _queue}, state) do
+    state = if state.paused, do: state, else: poll_and_process(state)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:job_complete, worker, job_id, result, duration_ms}, state) do
+    Logger.debug(
+      "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
+    )
+
+    state = handle_job_completion(state, worker)
+    # A backlog is claimed as slots free up, not a poll_interval at a time.
+    state = if state.backlog? and not state.paused, do: poll_and_process(state), else: state
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, worker, reason}, state) do
+    case Map.pop(state.workers, worker) do
+      {nil, _workers} ->
+        {:noreply, state}
+
+      {%{job_id: job_id}, workers} ->
+        Logger.warning("Worker for job #{job_id} crashed: #{inspect(reason)}")
+        # A run still running stays locked, for the stale sweep. One cancelled
+        # while the worker ran it kept the worker's lock (rule 30): the step
+        # died with the worker it's linked to, so that lock is let go now.
+        Adapter.default_adapter().let_go(state.config, job_id)
+        {:noreply, %{state | workers: workers}}
+    end
+  end
+
+  @impl true
+  def handle_info({:drain_check, from, timeout, start_time}, state) do
+    elapsed = System.monotonic_time(:millisecond) - start_time
+
+    cond do
+      state.workers == %{} ->
+        GenServer.reply(from, :ok)
+        {:noreply, state}
+
+      elapsed >= timeout ->
+        GenServer.reply(from, {:error, :timeout})
+        {:noreply, state}
+
+      true ->
+        Process.send_after(self(), {:drain_check, from, timeout, start_time}, 100)
+        {:noreply, state}
+    end
+  end
+
+  # Private functions
+
+  # The workers of a poller that died live on under their supervisor. They
+  # still hold the queue's slots, and they report here now, so their runs are
+  # settled as any other's.
+  defp adopt_workers(supervisor) do
+    for {_id, pid, _type, _modules} when is_pid(pid) <-
+          DynamicSupervisor.which_children(supervisor),
+        job = Worker.adopt(pid),
+        into: %{} do
+      {pid, %{ref: Process.monitor(pid), job_id: job.id, token: job[:lock_token]}}
+    end
+  end
+
+  # There may be more to claim (a backlog) while the last poll filled every
+  # slot it asked for, or found none free. A worker that finishes then polls
+  # again; a poll that comes back short ends it, as it ends a burst of wakes.
+  defp poll_and_process(state) do
+    available_slots = state.concurrency - map_size(state.workers)
+
+    if available_slots > 0 do
+      jobs = safely_fetch_jobs(state, available_slots)
+
+      emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
+
+      Enum.reduce(jobs, %{state | backlog?: length(jobs) == available_slots}, &start_worker/2)
+    else
+      %{state | backlog?: true}
+    end
+  end
+
+  # A poll that raises (the repo is away) is a poll that found nothing: the
+  # next one tries again. Crashing here restarts the poller into the same
+  # raise, and a few of those take the manager and every worker down.
+  defp safely_fetch_jobs(state, slots) do
+    Adapter.default_adapter().fetch_jobs(state.config, state.queue_name, slots, state.node_id)
+  rescue
+    error ->
+      Logger.error("[Durable] poll of #{state.queue_name} failed: #{Exception.message(error)}")
+      []
+  catch
+    :exit, reason ->
+      Logger.error("[Durable] poll of #{state.queue_name} failed: #{inspect(reason)}")
+      []
+  end
+
+  defp start_worker(job, state) do
+    case DynamicSupervisor.start_child(
+           state.worker_supervisor,
+           {Worker, job: job, config: state.config, poller_pid: self()}
+         ) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+
+        emit_job_claimed_telemetry(job, state.node_id)
+
+        # Keyed by worker: a run parked a moment ago can be claimed again before
+        # its last worker has reported back.
+        worker = %{ref: ref, job_id: job.id, token: job[:lock_token]}
+        %{state | workers: Map.put(state.workers, pid, worker)}
+
+      {:error, reason} ->
+        Logger.error("Failed to start worker for job #{job.id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  # The worker has settled its run already (Worker.settle_and_report/3): all
+  # that is left here is its slot.
+  defp handle_job_completion(state, worker) do
+    case Map.pop(state.workers, worker) do
+      {nil, _workers} ->
+        state
+
+      {%{ref: ref}, workers} ->
+        Process.demonitor(ref, [:flush])
+        %{state | workers: workers}
+    end
+  end
+
+  defp schedule_poll(state, delay) do
+    # A timer that has fired can't be cancelled: its :poll is in the mailbox
+    # already. Left there, it would start a second chain of polls beside the
+    # one scheduled here, and the queue would poll twice as often from then on.
+    if state.timer_ref && Process.cancel_timer(state.timer_ref) == false do
+      receive do
+        :poll -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    timer_ref = Process.send_after(self(), :poll, delay)
+    %{state | timer_ref: timer_ref}
+  end
+
+  defp emit_poll_telemetry(queue_name, jobs_fetched, available_slots) do
+    :telemetry.execute(
+      [:durable, :queue, :poll],
+      %{jobs_fetched: jobs_fetched},
+      %{queue: queue_name, available_slots: available_slots}
+    )
+  end
+
+  defp emit_job_claimed_telemetry(job, node_id) do
+    :telemetry.execute(
+      [:durable, :queue, :job_claimed],
+      %{count: 1},
+      %{
+        job_id: job.id,
+        queue: job.queue,
+        workflow_module: job.workflow_module,
+        workflow_name: job.workflow_name,
+        node_id: node_id
+      }
+    )
+  end
+end
