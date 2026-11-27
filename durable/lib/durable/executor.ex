@@ -837,6 +837,15 @@ defmodule Durable.Executor do
                   c.status,
                   c.lock_token,
                   c.locked_at
+                ),
+              # Lightforge carry: a lane or called child a retry puts back is a
+              # new attempt too, so it gets the next retry epoch (see
+              # put_retry_epoch/2), in this same write.
+              engine_state:
+                fragment(
+                  "jsonb_set(COALESCE(?, '{}'::jsonb), '{__retry_epoch__}', to_jsonb(COALESCE((?->>'__retry_epoch__')::bigint, 0) + 1))",
+                  c.engine_state,
+                  c.engine_state
                 )
             ]
           ]
