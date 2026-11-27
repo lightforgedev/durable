@@ -53,7 +53,9 @@ defmodule Durable.Lightforge.RetryEpochTest do
   end
 
   test "a keyed run's retry bumps the epoch too" do
-    {:ok, id} = Durable.start(Agentish, %{}, key: "lf-epoch-#{System.unique_integer([:positive])}")
+    {:ok, id} =
+      Durable.start(Agentish, %{}, key: "lf-epoch-#{System.unique_integer([:positive])}")
+
     assert execute_while_pending(id).status == :failed
 
     Process.put(:lf_broken, false)

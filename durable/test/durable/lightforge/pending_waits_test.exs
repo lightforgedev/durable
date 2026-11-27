@@ -58,7 +58,14 @@ defmodule Durable.Lightforge.PendingWaitsTest do
     assert {:ok, [%{kind: :input}]} = Durable.pending_waits(asks.id)
   end
 
-  test "is empty for an unknown run" do
-    assert Durable.pending_waits(Ecto.UUID.generate()) == {:ok, []}
+  test "is empty for a run with no pending waits" do
+    {:ok, id} = Durable.start(AsksApproval, %{})
+    assert Durable.pending_waits(id) == {:ok, []}
+  end
+
+  test "says :not_found for an id that isn't a run's" do
+    assert Durable.pending_waits(Ecto.UUID.generate()) == {:error, :not_found}
+    assert Durable.pending_waits("not-a-uuid") == {:error, :not_found}
+    assert Durable.pending_waits(nil) == {:error, :not_found}
   end
 end

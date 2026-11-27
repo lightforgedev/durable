@@ -3701,7 +3701,10 @@ defmodule Durable.Executor do
          {:ok, saved} <-
            execution
            |> Ecto.Changeset.change(context: merged)
-           |> Ecto.Changeset.force_change(:engine_state, record_saved(execution.engine_state, merged))
+           |> Ecto.Changeset.force_change(
+             :engine_state,
+             record_saved(execution.engine_state, merged)
+           )
            |> cas_update!(config) do
       saved
     else

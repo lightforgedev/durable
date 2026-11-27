@@ -36,8 +36,11 @@ defmodule Durable.Lightforge.AfterStartTest do
     workflow "lf_after_start_caller" do
       step :call, fn data ->
         case call_workflow(Child, %{}, ref: :child, after_start: &Gate.check/1) do
-          {:ok, _result} -> {:ok, assign(data, :outcome, "child_done")}
-          {:error, {:child_start_callback_failed, why}} -> {:ok, assign(data, :outcome, inspect(why))}
+          {:ok, _result} ->
+            {:ok, assign(data, :outcome, "child_done")}
+
+          {:error, {:child_start_callback_failed, why}} ->
+            {:ok, assign(data, :outcome, inspect(why))}
         end
       end
     end
@@ -51,8 +54,11 @@ defmodule Durable.Lightforge.AfterStartTest do
     workflow "lf_after_start_starter" do
       step :start, fn data ->
         case start_workflow(Child, %{}, ref: :child, after_start: &Gate.check/1) do
-          {:ok, id} -> {:ok, assign(data, :child, id)}
-          {:error, {:child_start_callback_failed, why}} -> {:ok, assign(data, :outcome, inspect(why))}
+          {:ok, id} ->
+            {:ok, assign(data, :child, id)}
+
+          {:error, {:child_start_callback_failed, why}} ->
+            {:ok, assign(data, :outcome, inspect(why))}
         end
       end
     end
@@ -66,7 +72,8 @@ defmodule Durable.Lightforge.AfterStartTest do
     workflow "lf_after_start_bad_gate" do
       step :call, fn data ->
         case call_workflow(Child, %{}, after_start: fn _id -> :yes end) do
-          {:error, {:child_start_callback_failed, why}} -> {:ok, assign(data, :outcome, inspect(why))}
+          {:error, {:child_start_callback_failed, why}} ->
+            {:ok, assign(data, :outcome, inspect(why))}
         end
       end
     end

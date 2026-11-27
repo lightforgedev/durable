@@ -1199,14 +1199,19 @@ defmodule Durable.Wait do
   Lists every pending input and event wait of one run, oldest first: inputs,
   then events. Lightforge carry (the engine's run view reads it).
 
-  Run-scoped, so unbounded. `{:ok, []}` for a run with no pending waits or an
-  id that isn't a run; hosts authorize the caller.
+  Run-scoped, so unbounded. `{:ok, []}` for a run with no pending waits,
+  `{:error, :not_found}` for an id that isn't a run's; hosts authorize the
+  caller.
 
       {:ok, waits} = Durable.Wait.pending_waits(workflow_id)
   """
   @spec pending_waits(String.t(), keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def pending_waits(workflow_id, opts \\ []) do
-    with {:ok, opts} <- Opts.validate(opts), do: {:ok, run_pending_waits(workflow_id, opts)}
+    with {:ok, opts} <- Opts.validate(opts),
+         :ok <- Opts.id(workflow_id),
+         config = get_config(opts),
+         :ok <- a_run(config, workflow_id),
+         do: {:ok, run_pending_waits(config, workflow_id)}
   end
 
   @doc "Like `pending_waits/2`, but returns the waits or raises `ArgumentError`."
@@ -1214,9 +1219,12 @@ defmodule Durable.Wait do
   def pending_waits!(workflow_id, opts \\ []),
     do: workflow_id |> pending_waits(opts) |> Opts.unwrap!(opts)
 
-  defp run_pending_waits(workflow_id, opts) do
-    config = get_config(opts)
+  defp a_run(config, workflow_id) do
+    query = from(w in WorkflowExecution, where: w.id == ^workflow_id, select: true)
+    if Repo.one(config, query), do: :ok, else: {:error, :not_found}
+  end
 
+  defp run_pending_waits(config, workflow_id) do
     inputs =
       from(p in PendingInput,
         where: p.workflow_id == ^workflow_id and p.status == :pending,
