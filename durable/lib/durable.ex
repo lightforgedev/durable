@@ -666,6 +666,17 @@ defmodule Durable do
   defdelegate cancel_wait(workflow_id, opts \\ []), to: Durable.Wait
 
   @doc """
+  Lists the pending input and event waits of one run. Lightforge carry; see
+  `Durable.Wait.pending_waits/2`.
+  """
+  @spec pending_waits(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate pending_waits(workflow_id, opts \\ []), to: Durable.Wait
+
+  @doc "Like `pending_waits/2`, but returns the waits or raises `ArgumentError`."
+  @spec pending_waits!(String.t(), keyword()) :: [map()]
+  defdelegate pending_waits!(workflow_id, opts \\ []), to: Durable.Wait
+
+  @doc """
   Provides input for a waiting workflow (human-in-the-loop).
 
   ## Examples

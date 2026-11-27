@@ -1196,6 +1196,47 @@ defmodule Durable.Wait do
   # ============================================================================
 
   @doc """
+  Lists every pending input and event wait of one run, oldest first: inputs,
+  then events. Lightforge carry (the engine's run view reads it).
+
+  Run-scoped, so unbounded. `{:ok, []}` for a run with no pending waits or an
+  id that isn't a run; hosts authorize the caller.
+
+      {:ok, waits} = Durable.Wait.pending_waits(workflow_id)
+  """
+  @spec pending_waits(String.t(), keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def pending_waits(workflow_id, opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts), do: {:ok, run_pending_waits(workflow_id, opts)}
+  end
+
+  @doc "Like `pending_waits/2`, but returns the waits or raises `ArgumentError`."
+  @spec pending_waits!(String.t(), keyword()) :: [map()]
+  def pending_waits!(workflow_id, opts \\ []),
+    do: workflow_id |> pending_waits(opts) |> Opts.unwrap!(opts)
+
+  defp run_pending_waits(workflow_id, opts) do
+    config = get_config(opts)
+
+    inputs =
+      from(p in PendingInput,
+        where: p.workflow_id == ^workflow_id and p.status == :pending,
+        order_by: [asc: p.inserted_at]
+      )
+      |> then(&Repo.all(config, &1))
+      |> Enum.map(&Map.merge(pending_input_to_map(&1), %{kind: :input, name: &1.input_name}))
+
+    events =
+      from(p in PendingEvent,
+        where: p.workflow_id == ^workflow_id and p.status == :pending,
+        order_by: [asc: p.inserted_at]
+      )
+      |> then(&Repo.all(config, &1))
+      |> Enum.map(&Map.merge(pending_event_to_map(&1), %{kind: :event, name: &1.event_name}))
+
+    inputs ++ events
+  end
+
+  @doc """
   Lists pending inputs for workflows.
 
   ## Filters
