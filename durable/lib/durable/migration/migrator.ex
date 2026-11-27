@@ -16,6 +16,7 @@ defmodule Durable.Migration.Migrator do
     Durable.Migration.Migrations.V20260103000000InitialSchema,
     Durable.Migration.Migrations.V20260104000000AddWaitPrimitives,
     Durable.Migration.Migrations.V20260413000000AddSchedulerResilience,
+    Durable.Migration.Migrations.V20260609000000AddStepExecutionSessionId,
     Durable.Migration.Migrations.V20260623000000AddLockFencing,
     Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink,
     Durable.Migration.Migrations.V20261016000000AddOperatorControls,
