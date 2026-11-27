@@ -157,7 +157,10 @@ failure, retry epoch, `after_start` child gate, bounded retry (engine).
 
 Branch `sync/upstream-merge-20261127`. History: graft `ac12f43` (parents lightforge-main `445652d95` +
 upstream `ad60324`; tree = upstream `ad60324` with `durable/` = lightforge-main) → merge upstream `a6e4467` taking
-upstream's tree → one commit per carry. Every later sync: `git merge upstream/main`.
+upstream's tree → carry-specific commits (a carry's review fixes are separate commits, not squashed, so the pushed
+branch is never rewritten): CI `3e5fcaf`; session_id `8f3265f`; pending_waits `85f210e` + `7a666b1`; retry epoch
+`df5af18` + `1a31d8d` + `afad6d7`; after_start `ec58a05`; failed-step context `ec2561a` + `cfdf833`. Every later sync:
+`git merge upstream/main`.
 
 **SQLite split (owner, 2026-11-27).** Porting SQLite onto 2.2 is a large job: raw SQL call sites went from 13 to 94, the
 queue adapter has 2 new callbacks, and 16 migrations need translating. So lightforge-main moves to 2.2 on Postgres now,
@@ -168,9 +171,9 @@ and the current SQLite code stays on **`lightforge-sqlite` = `445652d95`** for c
 |---|---|---|---|
 | `step_executions.session_id` | migration `V20260609000000` (original LF version), `StepExecution` | same | `step_execution_session_id_test.exs` 2/2 |
 | `pending_waits/2` + `!` | `Durable`, `Durable.Wait` | 2.x read contract: `{:ok, waits}`; `{:error, :not_found}` for an id that isn't a run's (was `[]`); in `ReadFunctions` | `lightforge/pending_waits_test.exs` 5/5 + read contract |
-| Retry epoch | `Executor.reopen/4` (every retry path), `EngineState` `__retry_epoch__`, **`Durable.Context.retry_epoch/0`** | moved from `context.__durable_retry_epoch` into engine state: in the context it made a never-saved run hand its step the context instead of its input (upstream `Issue48Test` failed). **Engine port: read `Durable.Context.retry_epoch/0`** | `lightforge/retry_epoch_test.exs` 5/5 (2 of the original 3 RED) |
+| Retry epoch | `Executor.reopen/4` (the run retried) **and `put_back/3`** (every lane and called child the retry requeues, in the same update), `EngineState` `__retry_epoch__`, **`Durable.Context.retry_epoch/0`** | moved from `context.__durable_retry_epoch` into engine state: in the context it made a never-saved run hand its step the context instead of its input (upstream `Issue48Test` failed). **Engine port: read `Durable.Context.retry_epoch/0`** | `lightforge/retry_epoch_test.exs` 5/5 (2 of the original 3 RED); `lightforge/retry_put_back_test.exs` 2/2 (failed lane, cancelled called child; both RED before `afad6d7`) |
 | `after_start` child gate | `Durable.Orchestration` | runs **inside** the insert transaction; failure rolls back, so a rejected child never commits (LF inserted then deleted). Also on `start_workflow/3` | `lightforge/after_start_test.exs` 4/4 (0/4 on upstream) |
-| Failed step keeps its context | `Executor.handle_step_failure/4` | step failures only; only the run's own process context (an inline child leaves its own behind) | `lightforge/failed_step_context_test.exs` 2/2 (0/2 on upstream) |
+| Failed step keeps its context | `Executor.handle_step_failure/4` | step failures only; only the run's own process context (an inline child leaves its own behind); engine state written = the row's current state with the step's process state over it, so a recorded child can't be erased | `lightforge/failed_step_context_test.exs` 2/2 (0/2 on upstream); `lightforge/failed_step_child_test.exs` 1/1 (start child, write context, fail, retry: one child, same correlation; passes before `cfdf833` too, since `run_step/4` already merges on the main path; guards `fail_at/5` and future paths) |
 | Root CI and Site workflows | `.github/workflows/{ci,site}.yml` | `workflow_dispatch` only (fork policy: no CI builds) | n/a |
 
 Dropped (covered upstream or unused, §8/§8.1): Lightforge admission columns (moves to the engine on upstream `:key`),
