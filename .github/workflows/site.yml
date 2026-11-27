@@ -5,22 +5,8 @@ name: Site
 # rebuild it too. Needs the CLOUDFLARE_API_TOKEN secret ("Edit Cloudflare
 # Workers" token for the WaveZync account).
 
+# Lightforge fork: manual only (no CI builds; test evidence is a local receipt).
 on:
-  push:
-    branches: [main]
-    paths: &paths
-      - "site/**"
-      - "shared.exs"
-      - "durable/*.md"
-      - "durable/guides/**"
-      - "durable/lib/**"
-      - "durable/mix.exs"
-      - "durable_dashboard/*.md"
-      - "durable_dashboard/mix.exs"
-      - ".github/workflows/site.yml"
-  pull_request:
-    branches: [main]
-    paths: *paths
   workflow_dispatch:
 
 concurrency:

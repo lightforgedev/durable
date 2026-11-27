@@ -1,10 +1,8 @@
 name: CI
 
+# Lightforge fork: manual only (no CI builds; test evidence is a local receipt).
 on:
-  push:
-    branches: [main]
-  # Every pull request, so one stacked on another is checked before it reaches main.
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
