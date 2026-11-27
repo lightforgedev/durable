@@ -572,23 +572,30 @@ defmodule Durable.Executor do
     result
   end
 
-  # Lightforge carry: each retry of a run bumps `context.__durable_retry_epoch`
-  # (1 on the first retry), in the transaction that reopens it, from the row it
-  # locked. The engine derives its attempt-scoped identity from it (agent
-  # session, completion event, approval names), so a retried step can't take
-  # the failed attempt's terminal event.
-  @retry_epoch "__durable_retry_epoch"
+  # Lightforge carry: each retry of a run bumps its retry epoch (1 on the first
+  # retry; `Durable.Context.retry_epoch/0`), in the transaction that reopens
+  # it, from the row it locked. The engine derives its attempt-scoped identity
+  # from it (agent session, completion event, approval names), so a retried
+  # step can't take the failed attempt's terminal event. Engine state, not
+  # context: a run that never saved a context must still be handed its input.
+  @retry_epoch "__retry_epoch__"
 
   defp put_retry_epoch(changeset, locked) do
-    context = (locked || changeset.data).context || %{}
+    engine_state =
+      Ecto.Changeset.get_change(changeset, :engine_state) ||
+        (locked || changeset.data).engine_state || %{}
 
     epoch =
-      case Map.get(context, @retry_epoch) do
+      case Map.get(engine_state, @retry_epoch) do
         n when is_integer(n) and n >= 0 -> n + 1
         _none -> 1
       end
 
-    Ecto.Changeset.put_change(changeset, :context, Map.put(context, @retry_epoch, epoch))
+    Ecto.Changeset.force_change(
+      changeset,
+      :engine_state,
+      Map.put(engine_state, @retry_epoch, epoch)
+    )
   end
 
   # A lane's block takes its notices, and a retry of the block puts its lanes

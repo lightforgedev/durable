@@ -281,6 +281,20 @@ defmodule Durable.Context do
   end
 
   @doc """
+  Lightforge: how many times this run has been retried with `Durable.retry/2`,
+  0 before the first. Unlike `attempt/0` it never starts again, so a host can
+  key attempt-scoped external work (an agent session, its completion event) on
+  it and never take an earlier attempt's.
+  """
+  @spec retry_epoch() :: non_neg_integer()
+  def retry_epoch do
+    case EngineState.current()["__retry_epoch__"] do
+      n when is_integer(n) and n >= 0 -> n
+      _none -> 0
+    end
+  end
+
+  @doc """
   Returns which attempt of the current step this is, starting at 1.
 
   The count carries over when a run resumes after a crash, and starts again at
