@@ -130,16 +130,25 @@ Method: each Lightforge-added test, from June base `a37f6c5` to `lightforge-main
 | `Context.input/0` readable in steps (context_input) | pass | covered, drop ours |
 | **context written before a step error is persisted** (error_normalization) | fail: `context["failure_evidence"]` nil | **real gap → carry** |
 | `pending_waits/1` ×2 (wait) | fail: undefined | **carry** in engine (§4) |
-| **retry re-executes only the failed step** (resume_edge_cases) | fail: step2 never re-ran | **real gap or semantics change → verify** against upstream `retry/2` vs `rerun/2`; engine has 1 `Durable.retry` caller |
+| **retry re-executes only the failed step** (resume_edge_cases) | fail: step2 never re-ran | **covered** (§8.1): the LF test fakes a failed row with no step history; upstream resumes from step rows. Retry epoch → **carry** (§8.1) |
 | **retry bounded** (resume_edge_cases) | fail: upstream returned `{:ok, _}` where we expect `:retry_limit_reached` | **real gap → carry the bound in the engine** (no unbounded retry from operators) |
 | retry already queued returns same receipt (resume_edge_cases) | fail: `{:error, :not_failed}` | semantics differ but still idempotent (no second run) → adopt upstream; engine maps `:not_failed` |
-| **provide_input wakes poller, non-inline** (wait) | fail: assert_eventually timed out | **verify**: likely harness (CommitWaker needs queues on) or a real wake gap → rewrite on upstream test helpers |
-| **child callback failure removes the child** (orchestration) | fail: parent not `:completed` | **verify**: host-registration gate (Lightforge `b58d7c3`) not upstream → likely carry |
+| **provide_input wakes poller, non-inline** (wait) | fail: assert_eventually timed out | **covered** (§8.1): harness — wake is deferred to commit; sandbox never commits |
+| **child callback failure removes the child** (orchestration) | fail: parent not `:completed` | **carry `after_start`** (§8.1): tenancy gate, no upstream equivalent |
 | inline child completion before parent wait; dynamic string refs (orchestration ×2) | fail: reads our `context["__children"]` internals | test reads internals → rewrite against upstream child links (`list_children`) before judging |
 | already-waiting workflow not re-executed (wait) | fail: `:superseded` vs `:not_pending` | covered (no re-execution); error atom differs → engine maps it |
-| `on_timeout: :fail` records mode; event timeout fails run (wait ×2) | fail: no `on_timeout` field; internal `do_check_timeouts/1` shape | test uses internals → rewrite on upstream wait-group `on_timeout: :fail`; carry column only if behaviour missing |
+| `on_timeout: :fail` records mode; event timeout fails run (wait ×2) | fail: no `on_timeout` field; internal `do_check_timeouts/1` shape | **drop** (§8.1): no consumer uses event `on_timeout: :fail` |
 | concurrent identical starts admit one (integration/concurrency) | fail: `Storage.Dialect` absent | expected: admission moves to the engine on upstream `:key` (§2/§4) |
 
-Carry list after gap 2: SQLite dialect layer, `step_executions.session_id`, `pending_waits`, **context
-persisted on step failure**, **bounded retry** (engine), plus whatever the 4 **verify** rows prove after their tests
-are rewritten against upstream APIs.
+### 8.1 Verify rows resolved (2026-11-27)
+
+| Item | Evidence | Action |
+|---|---|---|
+| Retry re-runs only the failed step, same id | Upstream `operator_controls_test.exs` `describe "retry/2"` + property "never re-runs a completed step" | **Covered, drop ours** |
+| Retry epoch `context.__durable_retry_epoch` | Engine `context.ex` derives `workflow_attempt = epoch + 1` so each retry gets a fresh agent session/event identity. Upstream `retry_workflow/2` (`reset_for_retry`) never sets it | **Carry** (Durable or engine). Without it a retried agent step replays the prior attempt's terminal event. Test: retry a failed agent step → new attempt id |
+| `provide_input` wakes the poller | Upstream resumes inside a transaction; `DurablePubSub.wake` defers to `CommitWaker` until commit, and the SQL sandbox never commits. Upstream `integration/run_control_test.exs` "input given / event sent inside a transaction resumes the run when it commits" (poll interval 1 h) run here: **3/3 pass** | **Covered, drop ours** |
+| `call_workflow(..., after_start: fun)` deletes the child when the gate fails | Upstream `Durable.Orchestration` has no `after_start` (opts: `ref`, `timeout`, `timeout_value`, `queue`, `durable`). Consumers: engine `declarative/runner.ex` `subworkflow_opts` → `MultiTenancy.verify_workflow_tag`; Phoenix `requirement_parent_workflow.ex` `verify_child_tenancy` | **Carry**, security-relevant (cross-tenant child guard). Port the LF test with the feature |
+| Event `wait_for_event(..., on_timeout: :fail)` | Upstream: `on_timeout` only on `PendingInput`; event timeouts always resume with `timeout_value`. No consumer passes it (engine `runner.ex`/`helpers.ex` pass only `timeout`/`timeout_value`; Phoenix, connect-phoenix: none) | **Drop.** Engine DDL `pending_events.on_timeout` (DEFAULT `'resume'`) becomes unused; leave it or drop it in the port |
+
+Carry list (final): SQLite dialect layer, `step_executions.session_id`, `pending_waits`, context persisted on step
+failure, retry epoch, `after_start` child gate, bounded retry (engine).
