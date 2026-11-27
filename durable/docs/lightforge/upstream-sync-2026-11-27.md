@@ -152,3 +152,37 @@ Method: each Lightforge-added test, from June base `a37f6c5` to `lightforge-main
 
 Carry list (final): SQLite dialect layer, `step_executions.session_id`, `pending_waits`, context persisted on step
 failure, retry epoch, `after_start` child gate, bounded retry (engine).
+
+## 9. Merge into lightforge-main (2026-11-27)
+
+Branch `sync/upstream-merge-20261127`. History: graft `ac12f43` (parents lightforge-main `445652d95` +
+upstream `ad60324`; tree = upstream `ad60324` with `durable/` = lightforge-main) → merge upstream `a6e4467` taking
+upstream's tree → one commit per carry. Every later sync: `git merge upstream/main`.
+
+**SQLite split (owner, 2026-11-27).** Porting SQLite onto 2.2 is a large job: raw SQL call sites went from 13 to 94, the
+queue adapter has 2 new callbacks, and 16 migrations need translating. So lightforge-main moves to 2.2 on Postgres now,
+and the current SQLite code stays on **`lightforge-sqlite` = `445652d95`** for connect-phoenix. The compile-time
+`schema_prefix` goes with it. Porting SQLite to 2.2 is its own bead, sized after an adapter spike.
+
+| Carry | Where | Change vs lightforge-main | Test (RED on upstream → GREEN) |
+|---|---|---|---|
+| `step_executions.session_id` | migration `V20260609000000` (original LF version), `StepExecution` | same | `step_execution_session_id_test.exs` 2/2 |
+| `pending_waits/2` + `!` | `Durable`, `Durable.Wait` | 2.x read contract: `{:ok, waits}`; `{:error, :not_found}` for an id that isn't a run's (was `[]`); in `ReadFunctions` | `lightforge/pending_waits_test.exs` 5/5 + read contract |
+| Retry epoch | `Executor.reopen/4` (every retry path), `EngineState` `__retry_epoch__`, **`Durable.Context.retry_epoch/0`** | moved from `context.__durable_retry_epoch` into engine state: in the context it made a never-saved run hand its step the context instead of its input (upstream `Issue48Test` failed). **Engine port: read `Durable.Context.retry_epoch/0`** | `lightforge/retry_epoch_test.exs` 5/5 (2 of the original 3 RED) |
+| `after_start` child gate | `Durable.Orchestration` | runs **inside** the insert transaction; failure rolls back, so a rejected child never commits (LF inserted then deleted). Also on `start_workflow/3` | `lightforge/after_start_test.exs` 4/4 (0/4 on upstream) |
+| Failed step keeps its context | `Executor.handle_step_failure/4` | step failures only; only the run's own process context (an inline child leaves its own behind) | `lightforge/failed_step_context_test.exs` 2/2 (0/2 on upstream) |
+| Root CI and Site workflows | `.github/workflows/{ci,site}.yml` | `workflow_dispatch` only (fork policy: no CI builds) | n/a |
+
+Dropped (covered upstream or unused, §8/§8.1): Lightforge admission columns (moves to the engine on upstream `:key`),
+`retry_count`/`last_retried_at` + `:retry_limit_reached` (bound moves to the engine), event `on_timeout`, pending-event
+index (upstream has it), wake-on-start/resume, error normalization, `Context.input`.
+
+Receipt at `1a31d8d` (porcelain empty, PG 18 throwaway): `compile --warnings-as-errors` 0, `format --check-formatted` 0,
+`mix test` **1454 passed, 0 failed** (600 excluded), `mix test --only integration` **482 passed, 0 failed**. Fuzz not run.
+
+**Owner action:** the fork's Actions ran upstream CI and Site on the mirror push to `main` (Site failed: no Cloudflare
+secret). Disable both on the fork (`gh workflow disable ci.yml site.yml -R lightforgedev/durable`) or turn Actions off;
+the dispatch-only change here covers lightforge-main only.
+
+Engine port inputs from this merge: `Durable.Context.retry_epoch/0`; `pending_waits!/1`; `{:error, {:child_start_callback_failed, _}}`
+from `start_workflow/3` too.
