@@ -3680,10 +3680,33 @@ defmodule Durable.Executor do
     # map here, or the failed/compensated write is rejected and the run stays
     # :running.
     error = storable_error(error)
+    execution = save_failed_step_context(config, execution)
 
     if workflow_def.opts[:on_failure] == :rollback or asks_rollback?(error),
       do: compensate_or_fail(execution, error, workflow_def, config),
       else: mark_failed(config, execution, error, rollback_at(execution, workflow_def))
+  end
+
+  # Lightforge carry: what the failed step put in the context before it failed
+  # is kept on the failed run. The engine's declarative runner is one step
+  # that tracks its own progress there (`__pointer`, `__results`); without it
+  # a retry re-runs every inner step done since the last save, agent steps
+  # included. Only this run's own process context counts: an inline child
+  # run in the same process leaves its own behind.
+  defp save_failed_step_context(config, execution) do
+    with true <- Context.workflow_id() == execution.id,
+         process_ctx when is_map(process_ctx) <- Process.get(:durable_context),
+         merged = process_ctx |> stored() |> EngineState.strip(),
+         true <- merged != execution.context,
+         {:ok, saved} <-
+           execution
+           |> Ecto.Changeset.change(context: merged)
+           |> Ecto.Changeset.force_change(:engine_state, record_saved(execution.engine_state, merged))
+           |> cas_update!(config) do
+      saved
+    else
+      _nothing_new -> execution
+    end
   end
 
   # A lane has nothing of its own to undo: its block's run is the one that waits.
