@@ -3709,23 +3709,31 @@ defmodule Durable.Executor do
   # a retry re-runs every inner step done since the last save, agent steps
   # included. Only this run's own process context counts: an inline child
   # run in the same process leaves its own behind.
+  #
+  # The engine state written with it is the row's as it is now with the step's
+  # own over it: the step may have recorded a child (`record_child/3` writes
+  # the row and the process) after `execution` was read, and a retry that
+  # lost that record would start the child again.
   defp save_failed_step_context(config, execution) do
     with true <- Context.workflow_id() == execution.id,
          process_ctx when is_map(process_ctx) <- Process.get(:durable_context),
          merged = process_ctx |> stored() |> EngineState.strip(),
          true <- merged != execution.context,
+         engine_state = Map.merge(row_engine_state(config, execution), EngineState.current()),
          {:ok, saved} <-
            execution
            |> Ecto.Changeset.change(context: merged)
-           |> Ecto.Changeset.force_change(
-             :engine_state,
-             record_saved(execution.engine_state, merged)
-           )
+           |> Ecto.Changeset.force_change(:engine_state, record_saved(engine_state, merged))
            |> cas_update!(config) do
       saved
     else
       _nothing_new -> execution
     end
+  end
+
+  defp row_engine_state(config, execution) do
+    query = from(w in WorkflowExecution, where: w.id == ^execution.id, select: w.engine_state)
+    Repo.one(config, query) || execution.engine_state || %{}
   end
 
   # A lane has nothing of its own to undo: its block's run is the one that waits.
