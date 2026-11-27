@@ -1,0 +1,16 @@
+# Elixir
+/_build/
+/deps/
+/cover/
+/doc/
+*.ez
+erl_crash.dump
+
+# Node (assets/)
+assets/node_modules/
+
+# Generated copy of the monorepo's ../shared.exs (canonical file lives at root).
+/shared.exs
+
+# Ignore package tarball (built via "mix hex.build").
+durable_dashboard-*.tar

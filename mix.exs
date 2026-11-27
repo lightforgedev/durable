@@ -1,120 +1,51 @@
-defmodule Durable.MixProject do
+defmodule DurableWorkspace.MixProject do
   use Mix.Project
 
-  # Lightforge distributes Durable as a standalone repository, unlike the
-  # upstream monorepo. Keep the package metadata beside mix.exs so every clone
-  # and Hex build is self-contained.
-  {shared, _bindings} = Code.eval_file(Path.join(__DIR__, "shared.exs"))
-
-  # Versioned independently of durable_dashboard.
-  @version "0.1.0-rc"
-  @elixir_requirement Keyword.fetch!(shared, :elixir)
-  @source_url Keyword.fetch!(shared, :source_url)
-  @homepage_url Keyword.fetch!(shared, :homepage_url)
-  @maintainers Keyword.fetch!(shared, :maintainers)
-  @licenses Keyword.fetch!(shared, :licenses)
+  @apps ~w(durable durable_dashboard)
 
   def project do
     [
-      app: :durable,
-      version: @version,
-      elixir: @elixir_requirement,
-      elixirc_paths: elixirc_paths(Mix.env()),
-      start_permanent: Mix.env() == :prod,
-      aliases: aliases(),
-      deps: deps(),
-      name: "Durable",
-      homepage_url: @homepage_url,
-      description: "A durable, resumable workflow engine for Elixir",
-      source_url: @source_url,
-      docs: docs(),
-      package: package()
-    ]
-  end
-
-  def cli do
-    [
-      preferred_envs: [precommit: :test]
-    ]
-  end
-
-  def application do
-    [
-      extra_applications: [:logger, :crypto],
-      mod: {Durable.Application, []}
-    ]
-  end
-
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
-  defp elixirc_paths(_), do: ["lib"]
-
-  defp deps do
-    [
-      # Core
-      {:ecto_sql, "~> 3.12"},
-      {:postgrex, "~> 0.19"},
-      {:jason, "~> 1.4"},
-      {:telemetry, "~> 1.3"},
-      {:nimble_options, "~> 1.1"},
-      {:crontab, "~> 1.1"},
-      {:igniter, "~> 0.6", optional: true},
-      {:phoenix_pubsub, "~> 2.1", optional: true},
-      # SQLite storage (single-node hosts, e.g. a desktop app). 0.23 is the
-      # last line on ecto ~> 3.13.0 and decimal 2.x, which the Platform pins.
-      {:ecto_sqlite3, "~> 0.23.0", optional: true},
-
-      # Dev/Test
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
-    ]
-  end
-
-  defp aliases do
-    [
-      setup: ["deps.get", "ecto.setup"],
-      "ecto.setup": ["ecto.create", "ecto.migrate"],
-      "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
-      precommit: ["format", "compile --warnings-as-errors", "credo --strict", "test"]
-    ]
-  end
-
-  defp docs do
-    [
-      main: "readme",
-      source_url: @source_url,
-      source_ref: "v#{@version}",
-      extras: [
-        "README.md",
-        "guides/ai_workflows.md",
-        "guides/branching.md",
-        "guides/compensations.md",
-        "guides/admission_and_wait_ingress.md",
-        "guides/orchestration.md",
-        "guides/parallel.md",
-        "guides/waiting.md"
+      app: :durable_workspace,
+      version: "0.0.0",
+      elixir: "~> 1.15",
+      deps: [
+        # durable_dashboard depends on durable via Hex (its committed default),
+        # so override to resolve the whole workspace against the local checkout.
+        {:durable, path: "durable", override: true},
+        {:durable_dashboard, path: "durable_dashboard"}
       ],
-      groups_for_modules: [
-        "Mix Tasks": [
-          Mix.Tasks.Durable.Migrations,
-          Mix.Tasks.Durable.Gen.Upgrade,
-          Mix.Tasks.Durable.Status,
-          Mix.Tasks.Durable.List,
-          Mix.Tasks.Durable.Run,
-          Mix.Tasks.Durable.Cancel,
-          Mix.Tasks.Durable.Cleanup
-        ]
+      aliases: [
+        setup: cmd("deps.get"),
+        compile: cmd("compile"),
+        test: cmd("test"),
+        format: cmd("format"),
+        precommit: cmd("precommit")
       ]
     ]
   end
 
-  defp package do
-    [
-      maintainers: @maintainers,
-      licenses: @licenses,
-      links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
-    ]
+  # Build an alias that runs `mix <command>` in each sub-app as its own OS
+  # process. We invoke `elixir -S mix` (rather than `mix` directly) so we can
+  # pass `--erl "-elixir ansi_enabled <bool>"`: each child's output is captured
+  # via `into:` (a pipe, not a TTY), so the child would otherwise disable ANSI
+  # and we'd lose colored test/credo/compiler output. Forwarding the root's
+  # `IO.ANSI.enabled?/0` keeps colors when the workspace runs in a terminal and
+  # correctly drops them when redirected (e.g. CI). A non-zero exit from any
+  # sub-app makes the whole workspace task fail.
+  defp cmd(command) do
+    ansi = IO.ANSI.enabled?()
+    base = ["--erl", "-elixir ansi_enabled #{ansi}", "-S", "mix", command]
+
+    for app <- @apps do
+      fn args ->
+        {_, code} =
+          System.cmd("elixir", base ++ args,
+            into: IO.binstream(:stdio, :line),
+            cd: app
+          )
+
+        if code > 0, do: System.at_exit(fn _ -> exit({:shutdown, 1}) end)
+      end
+    end
   end
 end
