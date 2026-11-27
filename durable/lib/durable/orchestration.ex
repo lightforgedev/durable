@@ -68,6 +68,10 @@ defmodule Durable.Orchestration do
   - `:timeout_value` - Value returned on timeout (default: `:child_timeout`)
   - `:queue` - Queue for the child workflow (default: "default")
   - `:durable` - Durable instance name (default: Durable)
+  - `:after_start` - Lightforge: `fn child_id -> :ok | {:error, reason} end`, run in
+    the transaction that inserts the child, before it commits. Anything but
+    `:ok` rolls the child back (it never becomes runnable) and the call returns
+    `{:error, {:child_start_callback_failed, reason}}`.
 
   ## What the parent sees on success
 
@@ -132,6 +136,10 @@ defmodule Durable.Orchestration do
   - `:ref` - Reference name for idempotency (default: module name)
   - `:queue` - Queue for the child workflow (default: "default")
   - `:durable` - Durable instance name (default: Durable)
+  - `:after_start` - Lightforge: `fn child_id -> :ok | {:error, reason} end`, run in
+    the transaction that inserts the child, before it commits. Anything but
+    `:ok` rolls the child back (it never becomes runnable) and the call returns
+    `{:error, {:child_start_callback_failed, reason}}`.
 
   ## Examples
 
@@ -139,7 +147,8 @@ defmodule Durable.Orchestration do
         %{"to" => email}, ref: :welcome_email)
 
   """
-  @spec start_workflow(module(), map(), keyword()) :: {:ok, String.t()}
+  @spec start_workflow(module(), map(), keyword()) ::
+          {:ok, String.t()} | {:error, {:child_start_callback_failed, term()}}
   def start_workflow(module, input, opts \\ []) do
     parent_id = Context.workflow_id()
     ref = Keyword.get(opts, :ref, module_to_ref(module))
@@ -177,14 +186,15 @@ defmodule Durable.Orchestration do
   # ============================================================================
 
   defp create_and_wait(module, input, parent_id, child_key, opts) do
-    {:ok, child_id} = create_child_execution(module, input, {parent_id, child_key, :call}, opts)
-
-    throw(
-      {:call_workflow,
-       child_id: child_id,
-       timeout: Keyword.get(opts, :timeout),
-       timeout_value: Keyword.get(opts, :timeout_value, :child_timeout)}
-    )
+    with {:ok, child_id} <-
+           create_child_execution(module, input, {parent_id, child_key, :call}, opts) do
+      throw(
+        {:call_workflow,
+         child_id: child_id,
+         timeout: Keyword.get(opts, :timeout),
+         timeout_value: Keyword.get(opts, :timeout_value, :child_timeout)}
+      )
+    end
   end
 
   # The worker that timed out the wait cancels the child, so what the child
@@ -274,16 +284,27 @@ defmodule Durable.Orchestration do
     # doesn't record it a second time.
     ref = Keyword.get(opts, :ref, module_to_ref(module))
 
-    {:ok, {execution, recorded}} =
+    created =
       Repo.transaction(config, fn ->
         {:ok, child} =
           %WorkflowExecution{} |> WorkflowExecution.changeset(attrs) |> Repo.insert(config)
 
-        recorded = %{key => child.id, "__call_children" => call_children(child.id, kind, ref)}
-        record_child(config, parent_id, recorded)
-        {child, recorded}
+        case after_start(opts, child.id) do
+          :ok ->
+            recorded = %{key => child.id, "__call_children" => call_children(child.id, kind, ref)}
+            record_child(config, parent_id, recorded)
+            {child, recorded}
+
+          {:error, reason} ->
+            config.repo.rollback({:child_start_callback_failed, reason})
+        end
       end)
 
+    with {:ok, {execution, recorded}} <- created,
+         do: started_child(config, execution, recorded, opts)
+  end
+
+  defp started_child(config, execution, recorded, opts) do
     for {name, value} <- recorded, do: EngineState.put_current(name, value)
 
     # A child its parent waits for is woken once the parent is listening.
@@ -299,6 +320,26 @@ defmodule Durable.Orchestration do
     end
 
     {:ok, execution.id}
+  end
+
+  # Lightforge carry: the host's gate on a child (the engine checks the child's
+  # tenancy tag). It runs before the insert commits, so a child that fails it
+  # is rolled back and no worker can ever claim it.
+  defp after_start(opts, child_id) do
+    case Keyword.get(opts, :after_start) do
+      nil ->
+        :ok
+
+      callback when is_function(callback, 1) ->
+        case callback.(child_id) do
+          :ok -> :ok
+          {:error, _reason} = error -> error
+          other -> {:error, {:invalid_after_start_result, other}}
+        end
+
+      _not_a_callback ->
+        {:error, :invalid_after_start_callback}
+    end
   end
 
   # Added to what the row has, not written over it: the step's own save writes
